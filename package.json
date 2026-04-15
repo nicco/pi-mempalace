@@ -11,13 +11,13 @@
     "memory",
     "rag"
   ],
-  "homepage": "https://github.com/MemPalace/mempalace",
+  "homepage": "https://github.com/juhas96/mempalace-pi",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/MemPalace/mempalace.git"
+    "url": "git+https://github.com/juhas96/mempalace-pi.git"
   },
   "bugs": {
-    "url": "https://github.com/MemPalace/mempalace/issues"
+    "url": "https://github.com/juhas96/mempalace-pi/issues"
   },
   "files": [
     "src",
