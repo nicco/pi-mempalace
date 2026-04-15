@@ -1,0 +1,58 @@
+{
+  "name": "mempalace-pi",
+  "version": "0.1.1",
+  "description": "MemPalace extension package for pi, adding commands, tools, and save reminders for memory workflows.",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "mempalace",
+    "memory",
+    "rag"
+  ],
+  "homepage": "https://github.com/MemPalace/mempalace",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MemPalace/mempalace.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MemPalace/mempalace/issues"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@mariozechner/pi-ai": {
+      "optional": true
+    },
+    "@mariozechner/pi-coding-agent": {
+      "optional": true
+    },
+    "@sinclair/typebox": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

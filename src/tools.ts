@@ -1,0 +1,121 @@
+import { StringEnum } from "@mariozechner/pi-ai";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
+import type { MemPalaceRuntime } from "./runtime";
+import { runMemPalace, stripAtPrefix, toolResult, formatExecOutput } from "./utils";
+
+export function registerTools(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
+	pi.registerTool({
+		name: "mempalace_instructions",
+		label: "MemPalace Instructions",
+		description: "Fetch the built-in MemPalace instructions for help, setup, search, mining, or status.",
+		promptSnippet: "Read MemPalace's built-in instructions for help, setup, search, mine, or status workflows.",
+		promptGuidelines: [
+			"Use MemPalace tools when the user asks about their memory palace, mining data, searching memories, or checking palace status.",
+		],
+		parameters: Type.Object({
+			name: StringEnum(["help", "init", "search", "mine", "status"] as const),
+		}),
+		async execute(_toolCallId, params, signal) {
+			const { command, result } = await runMemPalace(pi, ["instructions", params.name], signal);
+			return toolResult("MemPalace instructions", command, result);
+		},
+	});
+
+	pi.registerTool({
+		name: "mempalace_status",
+		label: "MemPalace Status",
+		description: "Show current MemPalace status, counts, and health.",
+		promptSnippet: "Show palace status, room counts, and health using MemPalace, preferring MCP when available.",
+		parameters: Type.Object({}),
+		async execute(_toolCallId, _params, signal) {
+			const mcpResult = await runtime.maybeCallMcpTool("mempalace_status", {}, signal);
+			if (mcpResult) return mcpResult;
+			const { command, result } = await runMemPalace(pi, ["status"], signal);
+			return toolResult("MemPalace status", command, result);
+		},
+	});
+
+	pi.registerTool({
+		name: "mempalace_init",
+		label: "MemPalace Init",
+		description: "Initialize a MemPalace in a target directory.",
+		promptSnippet: "Initialize MemPalace for a project directory.",
+		parameters: Type.Object({
+			directory: Type.String({ description: "Project directory to initialize" }),
+		}),
+		async execute(_toolCallId, params, signal) {
+			const directory = stripAtPrefix(params.directory);
+			const { command, result } = await runMemPalace(pi, ["init", directory], signal);
+			return toolResult("MemPalace init", command, result);
+		},
+	});
+
+	pi.registerTool({
+		name: "mempalace_search",
+		label: "MemPalace Search",
+		description: "Search memories stored in MemPalace.",
+		promptSnippet: "Search MemPalace memories by semantic query, optionally filtered by wing or room.",
+		parameters: Type.Object({
+			query: Type.String({ description: "Semantic query to search for" }),
+			wing: Type.Optional(Type.String({ description: "Optional wing filter" })),
+			room: Type.Optional(Type.String({ description: "Optional room filter" })),
+			limit: Type.Optional(Type.Integer({ description: "Optional result limit" })),
+			max_distance: Type.Optional(Type.Number({ description: "Optional maximum cosine distance" })),
+			context: Type.Optional(Type.String({ description: "Optional extra search context" })),
+		}),
+		async execute(_toolCallId, params, signal) {
+			const mcpResult = await runtime.maybeCallMcpTool("mempalace_search", params as Record<string, unknown>, signal);
+			if (mcpResult) return mcpResult;
+			const args = ["search", params.query];
+			if (params.wing) args.push("--wing", params.wing);
+			if (params.room) args.push("--room", params.room);
+			const { command, result } = await runMemPalace(pi, args, signal);
+			return toolResult("MemPalace search", command, result);
+		},
+	});
+
+	pi.registerTool({
+		name: "mempalace_mine",
+		label: "MemPalace Mine",
+		description: "Mine a project or conversation export into MemPalace.",
+		promptSnippet: "Mine a project directory or conversation export into MemPalace.",
+		parameters: Type.Object({
+			path: Type.String({ description: "Directory or source path to mine" }),
+			mode: Type.Optional(StringEnum(["project", "convos"] as const)),
+			extract: Type.Optional(StringEnum(["general"] as const)),
+			wing: Type.Optional(Type.String({ description: "Optional wing override" })),
+			split: Type.Optional(StringEnum(["none", "dry-run", "run"] as const)),
+		}),
+		async execute(_toolCallId, params, signal) {
+			const sourcePath = stripAtPrefix(params.path);
+			const outputs: string[] = [];
+			const details: Record<string, unknown> = { sourcePath };
+			let failed = false;
+
+			if (params.split && params.split !== "none") {
+				const splitArgs = ["split", sourcePath];
+				if (params.split === "dry-run") splitArgs.push("--dry-run");
+				const splitRun = await runMemPalace(pi, splitArgs, signal);
+				outputs.push(formatExecOutput("MemPalace split", splitRun.command, splitRun.result));
+				details.split = { command: splitRun.command, exitCode: splitRun.result.code };
+				if (splitRun.result.code !== 0) failed = true;
+			}
+
+			const mineArgs = ["mine", sourcePath];
+			if (params.mode && params.mode !== "project") mineArgs.push("--mode", params.mode);
+			if (params.extract) mineArgs.push("--extract", params.extract);
+			if (params.wing) mineArgs.push("--wing", params.wing);
+			const mineRun = await runMemPalace(pi, mineArgs, signal);
+			outputs.push(formatExecOutput("MemPalace mine", mineRun.command, mineRun.result));
+			details.mine = { command: mineRun.command, exitCode: mineRun.result.code };
+			if (mineRun.result.code !== 0) failed = true;
+
+			return {
+				content: [{ type: "text" as const, text: outputs.join("\n\n") }],
+				details,
+				isError: failed,
+			};
+		},
+	});
+}
