@@ -17,6 +17,11 @@ export type ExecResult = {
 	killed?: boolean;
 };
 
+export type PythonProbe = {
+	python3: ExecResult;
+	python: ExecResult;
+};
+
 export function stripAtPrefix(value: string): string {
 	return value.startsWith("@") ? value.slice(1) : value;
 }
@@ -90,20 +95,26 @@ export async function runMemPalace(
 	];
 
 	let last: { command: string[]; result: ExecResult } | undefined;
+	let missingModule: { command: string[]; result: ExecResult } | undefined;
 	for (const [command, commandArgs] of candidates) {
 		const result = (await pi.exec(command, commandArgs, { signal })) as ExecResult;
 		last = { command: [command, ...commandArgs], result };
 		if (result.code === 0) return last;
 
 		const combined = `${result.stdout}\n${result.stderr}`.toLowerCase();
-		const commandMissing =
+		const missingCommand =
 			combined.includes("command not found") ||
 			combined.includes("not recognized as an internal or external command") ||
-			combined.includes("no such file or directory") ||
-			combined.includes("no module named mempalace");
-		if (!commandMissing) return last;
+			combined.includes("no such file or directory");
+		const missingMemPalaceModule = combined.includes("no module named mempalace");
+
+		if (missingMemPalaceModule && !missingModule) {
+			missingModule = last;
+		}
+		if (!missingCommand && !missingMemPalaceModule) return last;
 	}
 
+	if (missingModule) return missingModule;
 	if (!last) throw new Error("No MemPalace command candidates were attempted.");
 	return last;
 }
@@ -128,4 +139,76 @@ export function sendUserMessage(pi: ExtensionAPI, ctx: ExtensionContext, text: s
 	} else {
 		pi.sendUserMessage(text, { deliverAs: "followUp" });
 	}
+}
+
+export function getMemPalaceSetupGuidance(error: string | undefined): string | undefined {
+	if (!error) return undefined;
+	if (/No module named mempalace/i.test(error) || /mempalace package is not installed/i.test(error)) {
+		return "MemPalace is disabled because the Python package 'mempalace' is not installed in the active Python environment. Install it with: python3 -m pip install mempalace";
+	}
+	if (/Python was not found/i.test(error) || /spawn python3 ENOENT/i.test(error) || /spawn python ENOENT/i.test(error)) {
+		return "MemPalace could not find a usable Python command in Pi's runtime environment. If Python works in your terminal but not in Pi, the PATH may differ. Run /mempalace:doctor to check what Pi can see.";
+	}
+	return undefined;
+}
+
+export async function probePythonEnvironment(pi: ExtensionAPI, signal?: AbortSignal): Promise<PythonProbe> {
+	const python3 = (await pi.exec("python3", ["--version"], { signal })) as ExecResult;
+	const python = (await pi.exec("python", ["--version"], { signal })) as ExecResult;
+	return { python3, python };
+}
+
+export function summarizePythonProbe(probe: PythonProbe): string[] {
+	const format = (label: string, result: ExecResult) => {
+		const output = (result.stdout || result.stderr).trim() || "no output";
+		return `${label}: exit ${result.code} (${truncate(output, 160)})`;
+	};
+	return [format("python3 --version", probe.python3), format("python --version", probe.python)];
+}
+
+export function refineSetupGuidance(guidance: string | undefined, probe?: PythonProbe): string | undefined {
+	if (!guidance) return undefined;
+	if (!probe) return guidance;
+
+	const python3Ok = probe.python3.code === 0;
+	const pythonOk = probe.python.code === 0;
+	if (/usable Python command/i.test(guidance)) {
+		if (python3Ok || pythonOk) {
+			const visible = [python3Ok ? (probe.python3.stdout || probe.python3.stderr).trim() : "", pythonOk ? (probe.python.stdout || probe.python.stderr).trim() : ""]
+				.filter(Boolean)
+				.join(", ");
+			return `MemPalace could not start its backend, but Pi can see Python (${visible || "version detected"}). The most likely problem is that the 'mempalace' Python package is not installed in the same interpreter. Install it with: python3 -m pip install mempalace. If that still fails, run /mempalace:doctor to compare what Pi can see.`;
+		}
+	}
+	return guidance;
+}
+
+export function getMemPalaceSetupGuidanceFromExec(command: string[], result: ExecResult): string | undefined {
+	const combined = [command.join(" "), result.stdout, result.stderr].filter(Boolean).join("\n");
+	return getMemPalaceSetupGuidance(combined);
+}
+
+export function unavailableToolResult(
+	label: string,
+	guidance: string,
+	command?: string[],
+	result?: ExecResult,
+	transport?: "cli" | "mcp",
+) {
+	const details: Record<string, unknown> = {
+		unavailable: true,
+		guidance,
+		transport: transport || "cli",
+	};
+	if (command) details.command = command;
+	if (result) {
+		details.stdout = result.stdout;
+		details.stderr = result.stderr;
+		details.exitCode = result.code;
+	}
+	return {
+		content: [{ type: "text" as const, text: `${label} unavailable. ${guidance}` }],
+		details,
+		isError: true,
+	};
 }

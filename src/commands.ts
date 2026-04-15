@@ -1,7 +1,17 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { CORE_COMMANDS, CORE_TOOLS } from "./constants";
 import type { MemPalaceRuntime } from "./runtime";
-import { quoteArg, runMemPalace, sendUserMessage, truncate } from "./utils";
+import {
+	getMemPalaceSetupGuidance,
+	getMemPalaceSetupGuidanceFromExec,
+	probePythonEnvironment,
+	quoteArg,
+	refineSetupGuidance,
+	runMemPalace,
+	sendUserMessage,
+	summarizePythonProbe,
+	truncate,
+} from "./utils";
 
 function queuePrompt(pi: ExtensionAPI, ctx: ExtensionContext, text: string) {
 	sendUserMessage(pi, ctx, text);
@@ -89,9 +99,18 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			const missingTools = [...CORE_TOOLS].filter((name) => !tools.includes(name));
 			lines.push(`core extension tools: ${missingTools.length === 0 ? "ok" : `missing ${missingTools.join(", ")}`}`);
 
+			const pythonProbe = await probePythonEnvironment(pi).catch(() => undefined);
+
 			const { client, tools: mcpTools } = await runtime.ensureMcpConnected();
 			runtime.registerDiscoveredMcpTools();
 			lines.push(`mcp bridge: ${client ? "ok" : `unavailable (${runtime.mcpStartupError || "unknown error"})`}`);
+			const mcpGuidance = refineSetupGuidance(getMemPalaceSetupGuidance(runtime.mcpStartupError), pythonProbe);
+			if (mcpGuidance) {
+				lines.push(`mcp setup required: ${mcpGuidance}`);
+			}
+			if (pythonProbe) {
+				lines.push(`python visibility in Pi:\n${summarizePythonProbe(pythonProbe).join("\n")}`);
+			}
 			if (client) {
 				lines.push(`mcp command: ${client.getCommandLine()}`);
 				lines.push(`mcp tool count: ${mcpTools.length}`);
@@ -111,6 +130,10 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			const versionRun = await runMemPalace(pi, ["--help"]);
 			lines.push(`cli probe: ${versionRun.result.code === 0 ? "ok" : `failed (exit ${versionRun.result.code})`}`);
 			lines.push(`cli command: ${versionRun.command.join(" ")}`);
+			const cliGuidance = refineSetupGuidance(getMemPalaceSetupGuidanceFromExec(versionRun.command, versionRun.result), pythonProbe);
+			if (cliGuidance) {
+				lines.push(`cli setup required: ${cliGuidance}`);
+			}
 			if (versionRun.result.code !== 0 && versionRun.result.stderr.trim()) {
 				lines.push(`cli stderr: ${truncate(versionRun.result.stderr.trim(), 1000)}`);
 			}
@@ -123,6 +146,15 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			if (statusRun.result.code !== 0 && statusRun.result.stderr.trim()) {
 				lines.push(`status stderr:\n${truncate(statusRun.result.stderr.trim(), 2000)}`);
 			}
+
+			const unavailableTools = [
+				"mempalace_status",
+				"mempalace_init",
+				"mempalace_search",
+				"mempalace_mine",
+			].filter(() => !!mcpGuidance || !!cliGuidance);
+			lines.push(`bundled tools always available: mempalace_instructions`);
+			lines.push(`backend-dependent tools: ${unavailableTools.length > 0 ? `unavailable (${unavailableTools.join(", ")})` : "ok"}`);
 
 			const ok =
 				missingCommands.length === 0 &&

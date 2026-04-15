@@ -2,6 +2,13 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Box, Text } from "@mariozechner/pi-tui";
 
 export function registerRenderers(pi: ExtensionAPI) {
+	pi.registerMessageRenderer("mempalace-notice", (message, _state, theme) => {
+		const body = String(message.content ?? "");
+		const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+		box.addChild(new Text(`${theme.fg("warning", theme.bold("! MemPalace Setup Needed"))}\n\n${theme.fg("muted", body)}`, 0, 0));
+		return box;
+	});
+
 	pi.registerMessageRenderer("mempalace-doctor", (message, { expanded }, theme) => {
 		const details = (message.details ?? {}) as { ok?: boolean };
 		const ok = !!details.ok;

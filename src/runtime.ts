@@ -7,6 +7,7 @@ export class MemPalaceRuntime {
 	private mcpClient?: MemPalaceMcpClient;
 	mcpStartupError?: string;
 	lastMcpToolError?: string;
+	hasShownSetupNotice = false;
 	readonly registeredMcpTools = new Set<string>();
 	readonly disabledMcpTools = new Set<string>();
 

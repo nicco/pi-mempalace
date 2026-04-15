@@ -65,18 +65,19 @@ export class MemPalaceMcpClient {
 			["python", ["-m", "mempalace.mcp_server"]],
 		];
 
-		let lastError: Error | undefined;
+		const errors: Error[] = [];
 		for (const [command, args] of attempts) {
 			try {
 				await this.spawnAndInitialize(command, args, signal);
 				return { commandLine: this.commandLine, tools: this.getTools() };
 			} catch (error) {
-				lastError = error instanceof Error ? error : new Error(String(error));
+				const normalized = error instanceof Error ? error : new Error(String(error));
+				errors.push(normalized);
 				await this.close();
 			}
 		}
 
-		throw lastError ?? new Error("Failed to start MemPalace MCP server.");
+		throw this.summarizeConnectErrors(errors, attempts.map(([command]) => command));
 	}
 
 	async callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
@@ -111,14 +112,29 @@ export class MemPalaceMcpClient {
 		child.stderr.on("data", (chunk) => {
 			this.stderrBuffer += chunk.toString();
 		});
-		child.once("exit", (code, sig) => {
-			const reason = `MemPalace MCP server exited (${sig ?? code ?? "unknown"}).`;
-			for (const [, pending] of this.pending) pending.reject(new Error(reason));
-			this.pending.clear();
-			this.child = undefined;
-		});
 
 		let startupComplete = false;
+		let startupFailed = false;
+		const startupFailure = new Promise<never>((_, reject) => {
+			const fail = (error: Error) => {
+				if (startupFailed) return;
+				startupFailed = true;
+				reject(error);
+			};
+
+			child.once("error", (error) => {
+				fail(this.createStartupError(command, error.message));
+			});
+			child.once("exit", (code, sig) => {
+				const reason = this.createStartupError(command, `process exited (${sig ?? code ?? "unknown"})`);
+				if (!startupComplete) fail(reason);
+				for (const [, pending] of this.pending) pending.reject(reason);
+				this.pending.clear();
+				this.child = undefined;
+				rl.close();
+			});
+		});
+
 		const abortStartup = () => {
 			if (startupComplete || child.killed) return;
 			child.kill();
@@ -126,25 +142,54 @@ export class MemPalaceMcpClient {
 		signal?.addEventListener("abort", abortStartup, { once: true });
 
 		try {
-			await this.request(
-				"initialize",
-				{
-					protocolVersion: "2025-11-25",
-					capabilities: { tools: {} },
-					clientInfo: { name: "pi-mempalace", version: "0.1.2" },
-				},
-				signal,
-			);
-			await this.notify("notifications/initialized", {});
-			const list = (await this.request("tools/list", {}, signal)) as { tools?: McpToolDefinition[] };
-			this.discoveredTools.clear();
-			for (const tool of list.tools ?? []) {
-				this.discoveredTools.set(tool.name, tool);
-			}
-			startupComplete = true;
+			await Promise.race([
+				startupFailure,
+				(async () => {
+					await this.request(
+						"initialize",
+						{
+							protocolVersion: "2025-11-25",
+							capabilities: { tools: {} },
+							clientInfo: { name: "pi-mempalace", version: "0.1.2" },
+						},
+						signal,
+					);
+					await this.notify("notifications/initialized", {});
+					const list = (await this.request("tools/list", {}, signal)) as { tools?: McpToolDefinition[] };
+					this.discoveredTools.clear();
+					for (const tool of list.tools ?? []) {
+						this.discoveredTools.set(tool.name, tool);
+					}
+					startupComplete = true;
+				})(),
+			]);
 		} finally {
 			signal?.removeEventListener("abort", abortStartup);
+			if (startupComplete) {
+				rl.close();
+			}
 		}
+	}
+
+	private createStartupError(command: string, message: string): Error {
+		const stderr = this.stderrBuffer.trim();
+		const detail = stderr ? `${message}\n${stderr}` : message;
+		return new Error(`Failed to start MemPalace MCP with ${command}: ${detail}`);
+	}
+
+	private summarizeConnectErrors(errors: Error[], attemptedCommands: string[]): Error {
+		const messages = errors.map((error) => error.message).join("\n");
+		const tried = attemptedCommands.join(", ");
+
+		if (errors.length > 0 && errors.every((error) => /ENOENT/i.test(error.message))) {
+			return new Error(`Python was not found (tried: ${tried}). Install Python 3 to enable MemPalace.`);
+		}
+
+		if (/No module named mempalace/i.test(messages)) {
+			return new Error(`Python was found, but the mempalace package is not installed in the environment used by ${tried}.`);
+		}
+
+		return new Error(errors[errors.length - 1]?.message || "Failed to start MemPalace MCP server.");
 	}
 
 	private async notify(method: string, params: Record<string, unknown>): Promise<void> {
