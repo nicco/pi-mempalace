@@ -21,14 +21,31 @@ A pi package that brings core MemPalace workflows to pi.
   - starts `python3 -m mempalace.mcp_server` when available
   - dynamically exposes MemPalace MCP tools to the agent
   - uses MCP for `mempalace_status` and `mempalace_search` when possible, with CLI fallback
+  - fails gracefully when Python or the `mempalace` Python package is missing, without crashing pi
+  - shows an in-app setup notice when MemPalace cannot start because dependencies are missing
 - Session hooks:
   - auto-save reminder every 15 non-command user messages
   - pre-compaction reminder that blocks compaction once per user checkpoint, then allows the retry to proceed
 
 ## Requirements
 
+To actually use MemPalace features from Pi, you need:
+
 - Python 3.9+
-- `mempalace` installed in the Python environment visible to `python3`, `python`, or the `mempalace` executable
+- the `mempalace` Python package installed in the Python environment visible to `python3`, `python`, or the `mempalace` executable
+
+Typical setup:
+
+```bash
+python3 -m pip install mempalace
+```
+
+If Python is not installed, or if the `mempalace` Python package is missing:
+
+- pi will still start normally
+- this extension will still load and register its slash commands/tools
+- `mempalace_instructions` will still work because it is bundled in this package
+- backend-dependent tools such as status/search/init/mine will be marked unavailable and will return a friendly setup message instead of crashing pi
 
 ## Install in pi
 
@@ -52,11 +69,14 @@ pi install npm:mempalace-pi
 
 After installation, restart pi or run `/reload`, then use:
 
+- `/mempalace:help`
 - `/mempalace:init`
 - `/mempalace:status`
 - `/mempalace:doctor`
 - `/mempalace:search auth token rotation`
 - `/mempalace:mine .`
+
+Use `/mempalace:doctor` to see whether bundled help is available, whether the MCP bridge is connected, and which backend-dependent tools are currently unavailable due to missing prerequisites.
 
 ## Publish to npm
 

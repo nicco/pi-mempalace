@@ -1,7 +1,15 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { AUTO_SAVE_MARKER, PRECOMPACT_BLOCK_REASON, SAVE_INTERVAL, STOP_BLOCK_REASON } from "./constants";
 import type { MemPalaceRuntime } from "./runtime";
-import { countRelevantUserMessages, getRelevantUserMessageKey, maybeAutoIngest, sendUserMessage } from "./utils";
+import {
+	countRelevantUserMessages,
+	getMemPalaceSetupGuidance,
+	getRelevantUserMessageKey,
+	maybeAutoIngest,
+	probePythonEnvironment,
+	refineSetupGuidance,
+	sendUserMessage,
+} from "./utils";
 
 export function registerHooks(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 	pi.on("session_start", async (_event, ctx) => {
@@ -10,7 +18,22 @@ export function registerHooks(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 		runtime.registerDiscoveredMcpTools();
 		if (ctx.hasUI && tools.length > 0) {
 			ctx.ui.notify(`MemPalace MCP connected (${tools.length} tools)`, "success");
+			return;
 		}
+
+		const probe = await probePythonEnvironment(pi).catch(() => undefined);
+		const guidance = refineSetupGuidance(getMemPalaceSetupGuidance(runtime.mcpStartupError), probe);
+		if (!guidance || runtime.hasShownSetupNotice) return;
+		runtime.hasShownSetupNotice = true;
+		if (ctx.hasUI) {
+			ctx.ui.notify(guidance, "warning");
+		}
+		pi.sendMessage({
+			customType: "mempalace-notice",
+			content: guidance,
+			display: true,
+			details: { severity: "warning", source: "session_start", error: runtime.mcpStartupError },
+		});
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {

@@ -2,7 +2,16 @@ import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import type { MemPalaceRuntime } from "./runtime";
-import { runMemPalace, stripAtPrefix, toolResult, formatExecOutput } from "./utils";
+import { getBundledInstructions } from "./instructions";
+import {
+	formatExecOutput,
+	getMemPalaceSetupGuidance,
+	getMemPalaceSetupGuidanceFromExec,
+	runMemPalace,
+	stripAtPrefix,
+	toolResult,
+	unavailableToolResult,
+} from "./utils";
 
 export function registerTools(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 	pi.registerTool({
@@ -16,9 +25,13 @@ export function registerTools(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 		parameters: Type.Object({
 			name: StringEnum(["help", "init", "search", "mine", "status"] as const),
 		}),
-		async execute(_toolCallId, params, signal) {
-			const { command, result } = await runMemPalace(pi, ["instructions", params.name], signal);
-			return toolResult("MemPalace instructions", command, result);
+		async execute(_toolCallId, params) {
+			const text = getBundledInstructions(params.name);
+			return {
+				content: [{ type: "text" as const, text }],
+				details: { source: "bundled", name: params.name },
+				isError: false,
+			};
 		},
 	});
 
@@ -32,6 +45,8 @@ export function registerTools(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			const mcpResult = await runtime.maybeCallMcpTool("mempalace_status", {}, signal);
 			if (mcpResult) return mcpResult;
 			const { command, result } = await runMemPalace(pi, ["status"], signal);
+			const guidance = getMemPalaceSetupGuidanceFromExec(command, result) || getMemPalaceSetupGuidance(runtime.mcpStartupError);
+			if (result.code !== 0 && guidance) return unavailableToolResult("MemPalace status", guidance, command, result);
 			return toolResult("MemPalace status", command, result);
 		},
 	});
@@ -47,6 +62,8 @@ export function registerTools(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 		async execute(_toolCallId, params, signal) {
 			const directory = stripAtPrefix(params.directory);
 			const { command, result } = await runMemPalace(pi, ["init", directory], signal);
+			const guidance = getMemPalaceSetupGuidanceFromExec(command, result) || getMemPalaceSetupGuidance(runtime.mcpStartupError);
+			if (result.code !== 0 && guidance) return unavailableToolResult("MemPalace init", guidance, command, result);
 			return toolResult("MemPalace init", command, result);
 		},
 	});
@@ -71,6 +88,8 @@ export function registerTools(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			if (params.wing) args.push("--wing", params.wing);
 			if (params.room) args.push("--room", params.room);
 			const { command, result } = await runMemPalace(pi, args, signal);
+			const guidance = getMemPalaceSetupGuidanceFromExec(command, result) || getMemPalaceSetupGuidance(runtime.mcpStartupError);
+			if (result.code !== 0 && guidance) return unavailableToolResult("MemPalace search", guidance, command, result);
 			return toolResult("MemPalace search", command, result);
 		},
 	});
@@ -97,6 +116,10 @@ export function registerTools(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 				const splitArgs = ["split", sourcePath];
 				if (params.split === "dry-run") splitArgs.push("--dry-run");
 				const splitRun = await runMemPalace(pi, splitArgs, signal);
+				const splitGuidance = getMemPalaceSetupGuidanceFromExec(splitRun.command, splitRun.result) || getMemPalaceSetupGuidance(runtime.mcpStartupError);
+				if (splitRun.result.code !== 0 && splitGuidance) {
+					return unavailableToolResult("MemPalace split", splitGuidance, splitRun.command, splitRun.result);
+				}
 				outputs.push(formatExecOutput("MemPalace split", splitRun.command, splitRun.result));
 				details.split = { command: splitRun.command, exitCode: splitRun.result.code };
 				if (splitRun.result.code !== 0) failed = true;
@@ -107,6 +130,10 @@ export function registerTools(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			if (params.extract) mineArgs.push("--extract", params.extract);
 			if (params.wing) mineArgs.push("--wing", params.wing);
 			const mineRun = await runMemPalace(pi, mineArgs, signal);
+			const mineGuidance = getMemPalaceSetupGuidanceFromExec(mineRun.command, mineRun.result) || getMemPalaceSetupGuidance(runtime.mcpStartupError);
+			if (mineRun.result.code !== 0 && mineGuidance) {
+				return unavailableToolResult("MemPalace mine", mineGuidance, mineRun.command, mineRun.result);
+			}
 			outputs.push(formatExecOutput("MemPalace mine", mineRun.command, mineRun.result));
 			details.mine = { command: mineRun.command, exitCode: mineRun.result.code };
 			if (mineRun.result.code !== 0) failed = true;
