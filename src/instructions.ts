@@ -1,81 +1,132 @@
 const INSTRUCTIONS: Record<string, string> = {
-	help: `MemPalace workflows
+	help: `# MemPalace for Pi
 
-Available slash commands:
-- /mempalace:help
-- /mempalace:init
-- /mempalace:search <query>
-- /mempalace:mine [path]
-- /mempalace:status
-- /mempalace:doctor
+MemPalace gives Pi a persistent, searchable memory palace for projects, conversations, people, and decisions.
 
-Available tools:
+## Slash commands
+- /mempalace:help — overview of commands, tools, hooks, and architecture
+- /mempalace:init — install/setup flow and palace initialization
+- /mempalace:search <query> — semantic search across the palace
+- /mempalace:mine [path] — mine a project or conversation source
+- /mempalace:status — quick palace + graph health summary
+- /mempalace:doctor — Pi-specific diagnostics for MCP, CLI, and hook behavior
+
+## Core Pi tools
 - mempalace_instructions({ name })
 - mempalace_init({ directory })
 - mempalace_search({ query, wing?, room?, limit?, max_distance?, context? })
 - mempalace_mine({ path, mode?, extract?, wing?, split? })
 - mempalace_status()
 
-Recommended flow:
-1. Check status
-2. Initialize a palace for your project
-3. Mine a project or conversation export
-4. Search for previously saved knowledge
-5. Use /mempalace:doctor if the backend is unavailable`,
+## Important MCP write tools
+When saving memory, prefer these tools when available:
+- mempalace_diary_write — AAAK-compressed session summaries
+- mempalace_add_drawer — verbatim quotes, decisions, code snippets, important context
+- mempalace_kg_add — durable facts/relationships
+- mempalace_check_duplicate — duplicate check before filing near-identical content
 
-	init: `MemPalace setup
+## Other useful MCP tools
+- mempalace_list_wings / mempalace_list_rooms / mempalace_get_taxonomy
+- mempalace_kg_query / mempalace_kg_timeline / mempalace_kg_stats
+- mempalace_traverse / mempalace_find_tunnels / mempalace_graph_stats
+- mempalace_hook_settings / mempalace_memories_filed_away / mempalace_reconnect
+  - hook_settings can influence Pi autosave silence/toast behavior when available
+  - memories_filed_away can confirm a recent silent checkpoint
+  - reconnect can refresh stale MCP state after external or CLI writes
 
-Prerequisites:
-- Python 3.9+
-- The Python package 'mempalace' installed in the interpreter Pi can access
+## Save-hook behavior in Pi
+- Every 15 non-command user messages, Pi injects a MemPalace save checkpoint.
+- Before compaction, Pi first tries to mine conversation context synchronously using the best available target (MEMPAL_DIR, current session file directory, then cwd).
+- If synchronous ingest cannot preserve the context, Pi blocks compaction once and asks the agent to file the memory explicitly.
 
-Typical steps:
-1. Install Python 3
-2. Install MemPalace: python3 -m pip install mempalace
-3. Run mempalace_init with your project directory
-4. Verify with mempalace_status or /mempalace:doctor`,
+## Recommended flow
+1. Run /mempalace:init if MemPalace is not installed/configured yet.
+2. Use /mempalace:mine to add project files or conversation exports.
+3. Use /mempalace:search before answering questions about prior decisions.
+4. During save checkpoints, use diary_write + add_drawer, and kg_add when facts changed.
+5. Use /mempalace:doctor when MCP/CLI availability is unclear.`,
 
-	search: `MemPalace search
+	init: `# MemPalace init
 
-Use mempalace_search with:
-- query: required semantic query
-- wing: optional wing filter
-- room: optional room filter
-- limit: optional result limit
-- max_distance: optional similarity threshold
-- context: optional extra context
+Guide the user through a full setup in this order:
+1. Verify Python 3.9+ is available.
+2. Verify or install the mempalace Python package.
+3. Initialize the target directory with mempalace_init.
+4. Verify health with mempalace_status or /mempalace:doctor.
 
-Typical flow:
-1. Start with a natural-language query
-2. Narrow with wing/room if results are broad
-3. Summarize results with source attribution`,
+## Notes for Pi
+- mempalace_instructions prefers CLI-backed upstream instructions when the mempalace package is installed.
+- If MemPalace is missing, Pi still keeps bundled instructions available so setup guidance never disappears.
+- Pi handles MCP connection itself, but the user still needs the Python package available to the Pi runtime.
 
-	mine: `MemPalace mining
+## Troubleshooting order
+- Python missing → install Python 3.9+
+- mempalace package missing → python3 -m pip install mempalace
+- Pi sees a different interpreter than the terminal → compare with /mempalace:doctor
+- MCP startup failing after install → inspect /mempalace:doctor stderr and retry`,
 
-Use mempalace_mine with:
-- path: required source path
-- mode: optional, project or convos
-- extract: optional extraction preset
-- wing: optional target wing override
-- split: optional pre-splitting mode
+	search: `# MemPalace search
 
-Typical flow:
-1. Choose the source path
-2. Optionally split large inputs
-3. Mine the source into MemPalace
-4. Verify results with search or status`,
+## Search workflow
+1. Start with mempalace_search using a natural-language query.
+2. If results are broad or the wing/room is unclear, use taxonomy tools first:
+   - mempalace_list_wings
+   - mempalace_list_rooms
+   - mempalace_get_taxonomy
+3. Present results with source attribution (wing, room, and similarity/context when available).
+4. If the topic spans domains, consider graph tools:
+   - mempalace_traverse
+   - mempalace_find_tunnels
 
-	status: `MemPalace status
+## Pi fallback
+If MCP is unavailable, Pi falls back to the MemPalace CLI for mempalace_search.
 
-Use mempalace_status to inspect:
-- whether MemPalace is reachable
-- health and counts
-- whether MCP is available
+## Output expectations
+- Include the source wing and room.
+- Prefer verbatim snippets when possible.
+- Suggest a narrower follow-up search when many results match.`,
 
-If status fails:
-- run /mempalace:doctor
-- verify Python 3 is installed
-- verify the Python package 'mempalace' is installed`,
+	mine: `# MemPalace mine
+
+## Mining workflow
+1. Clarify what the source is:
+   - project directory
+   - conversation export(s)
+2. Choose the right mode:
+   - project
+   - convos
+   - convos + extract general for auto-classification
+3. If inputs are huge, consider split or split dry-run before mining.
+4. Run mempalace_mine.
+5. Suggest follow-up verification with /mempalace:search or /mempalace:status.
+
+## Pi-specific notes
+- Pi save hooks may also auto-run mempalace mine in the background.
+- Auto-ingest target priority is: MEMPAL_DIR → current session file directory → cwd.
+- Explicit diary_write/add_drawer filing is still preferred for high-value session context, quotes, and decisions.`,
+
+	status: `# MemPalace status
+
+## Status workflow
+1. Use mempalace_status for the core palace overview.
+2. If MCP tools are available, also use:
+   - mempalace_kg_stats
+   - mempalace_graph_stats
+3. Summarize the state briefly:
+   - wings / rooms / drawers / total memories
+   - knowledge graph health
+   - graph/tunnel health
+4. Suggest one next action based on the current state.
+
+## Pi diagnostics to mention when relevant
+- whether the MCP bridge is connected
+- whether CLI fallback is working
+- whether save-path tools like diary_write/add_drawer are available
+- whether recent auto-ingest or save hooks have run
+- whether memories_filed_away acknowledged a recent silent checkpoint
+- whether reconnect was recently needed after CLI/external writes
+
+If status itself fails, direct the user to /mempalace:doctor.`,
 };
 
 export function getBundledInstructions(name: string): string {

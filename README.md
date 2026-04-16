@@ -12,20 +12,23 @@ A pi package that brings core MemPalace workflows to pi.
   - `/mempalace:status`
   - `/mempalace:doctor` (custom rendered status panel)
 - Agent tools:
-  - `mempalace_instructions`
+  - `mempalace_instructions` (prefers CLI-backed upstream instructions, falls back to bundled help)
   - `mempalace_init`
   - `mempalace_search`
   - `mempalace_mine`
   - `mempalace_status`
 - MCP bridge:
   - starts `python3 -m mempalace.mcp_server` when available
-  - dynamically exposes MemPalace MCP tools to the agent
+  - dynamically exposes the MemPalace MCP tool surface to the agent, including write and system tools when the installed server provides them
   - uses MCP for `mempalace_status` and `mempalace_search` when possible, with CLI fallback
   - fails gracefully when Python or the `mempalace` Python package is missing, without crashing pi
   - shows an in-app setup notice when MemPalace cannot start because dependencies are missing
 - Session hooks:
-  - auto-save reminder every 15 non-command user messages
-  - pre-compaction reminder that blocks compaction once per user checkpoint, then allows the retry to proceed
+  - auto-save reminder every 15 non-command user messages using the upstream-style memory filing protocol (`mempalace_diary_write`, `mempalace_add_drawer`, optional `mempalace_kg_add`)
+  - explicit UI toasts when auto-save or pre-compaction checkpoints trigger
+  - if `mempalace_hook_settings` is available, Pi maps `silent_save=true` to silent autosave checkpoints and `desktop_toast` to Pi toast visibility
+  - background auto-ingest on save checkpoints using `MEMPAL_DIR`, current session file directory, or `cwd`
+  - synchronous pre-compaction ingest; if that cannot preserve context, Pi falls back to a one-time blocking save reminder
 
 ## Requirements
 
@@ -76,7 +79,9 @@ After installation, restart pi or run `/reload`, then use:
 - `/mempalace:search auth token rotation`
 - `/mempalace:mine .`
 
-Use `/mempalace:doctor` to see whether bundled help is available, whether the MCP bridge is connected, and which backend-dependent tools are currently unavailable due to missing prerequisites.
+Use `/mempalace:doctor` to see whether CLI/bundled help is available, whether the MCP bridge is connected, which memory-filing/system tools are reachable, whether recent auto-ingest ran, whether `memories_filed_away` acknowledged a silent checkpoint, whether reconnect was recently needed after CLI writes, and which upstream-documented tools are missing from the currently installed MemPalace server.
+
+See [`docs/claude-plugin-parity.md`](docs/claude-plugin-parity.md) for the current Claude-plugin parity matrix and documented Pi-specific deviations.
 
 ## Publish to npm
 
@@ -119,6 +124,11 @@ This avoids putting helper modules inside an auto-discovered `extensions/` direc
 
 ## Notes
 
-This extension now includes a built-in MCP bridge for `mempalace.mcp_server`, so pi agents can use the structured MemPalace tool surface when the MCP server is available. For compatibility, the package keeps CLI-backed fallbacks for setup, mining, and for status/search if MCP cannot be started.
+This extension includes a built-in MCP bridge for `mempalace.mcp_server`, so Pi agents can use the structured MemPalace tool surface when the MCP server is available. For compatibility, the package keeps CLI-backed fallbacks for setup, mining, instructions, and for status/search if MCP cannot be started.
 
-If `MEMPAL_DIR` is set, the extension also kicks off a background `mempalace mine "$MEMPAL_DIR"` when an auto-save or pre-compact reminder triggers.
+On save checkpoints and pre-compaction, the extension tries to preserve memory by mining the best available target in this order:
+1. `MEMPAL_DIR`
+2. the current Pi session file directory
+3. the current working directory
+
+That keeps Pi close to the upstream Claude plugin's transcript-aware save behavior, while documenting the remaining Pi-specific hook differences in the parity doc.

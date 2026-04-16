@@ -1,4 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { existsSync, statSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { chooseAutoIngestTarget } from "./auto-ingest-policy.js";
 import { AUTO_SAVE_MARKER } from "./constants";
 
 type SessionEntryLike = {
@@ -127,10 +130,67 @@ export function toolResult(label: string, command: string[], result: ExecResult)
 	};
 }
 
-export async function maybeAutoIngest(pi: ExtensionAPI) {
-	const mempalDir = process.env.MEMPAL_DIR?.trim();
-	if (!mempalDir) return;
-	void runMemPalace(pi, ["mine", mempalDir]).catch(() => undefined);
+export type AutoIngestOutcome = {
+	started: boolean;
+	mode: "background" | "foreground";
+	targetPath?: string;
+	targetSource?: "env" | "session" | "cwd";
+	command?: string[];
+	result?: ExecResult;
+};
+
+function normalizeDirectory(candidate: string | undefined): string | undefined {
+	const trimmed = candidate?.trim();
+	if (!trimmed) return undefined;
+	try {
+		const resolved = resolve(trimmed);
+		if (!existsSync(resolved)) return undefined;
+		const stat = statSync(resolved);
+		return stat.isDirectory() ? resolved : dirname(resolved);
+	} catch {
+		return undefined;
+	}
+}
+
+export function resolveAutoIngestTarget(ctx?: Pick<ExtensionContext, "cwd" | "sessionManager">): {
+	targetPath?: string;
+	targetSource?: "env" | "session" | "cwd";
+} {
+	return chooseAutoIngestTarget({
+		envTarget: normalizeDirectory(process.env.MEMPAL_DIR),
+		sessionTarget: normalizeDirectory(ctx?.sessionManager.getSessionFile?.()),
+		cwdTarget: normalizeDirectory(ctx?.cwd),
+	});
+}
+
+export async function maybeAutoIngest(
+	pi: ExtensionAPI,
+	ctx?: Pick<ExtensionContext, "cwd" | "sessionManager">,
+	signal?: AbortSignal,
+	mode: "background" | "foreground" = "background",
+): Promise<AutoIngestOutcome> {
+	const { targetPath, targetSource } = resolveAutoIngestTarget(ctx);
+	if (!targetPath || !targetSource) return { started: false, mode };
+	if (mode === "background") {
+		void runMemPalace(pi, ["mine", targetPath], signal).catch(() => undefined);
+		return {
+			started: true,
+			mode,
+			targetPath,
+			targetSource,
+			command: ["mempalace", "mine", targetPath],
+		};
+	}
+
+	const run = await runMemPalace(pi, ["mine", targetPath], signal);
+	return {
+		started: true,
+		mode,
+		targetPath,
+		targetSource,
+		command: run.command,
+		result: run.result,
+	};
 }
 
 export function sendUserMessage(pi: ExtensionAPI, ctx: ExtensionContext, text: string) {

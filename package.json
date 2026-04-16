@@ -21,6 +21,7 @@
   },
   "files": [
     "src",
+    "docs",
     "README.md",
     "LICENSE"
   ],
@@ -30,6 +31,9 @@
   "exports": {
     ".": "./src/index.ts",
     "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
   },
   "pi": {
     "extensions": [
