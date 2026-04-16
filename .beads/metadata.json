@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "mempalace_pi",
+  "project_id": "c242f2ae-900e-44b9-8e9d-7aa0f558ca38"
+}
