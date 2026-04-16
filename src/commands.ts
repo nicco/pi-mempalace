@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { CORE_COMMANDS, CORE_TOOLS } from "./constants";
+import { CORE_COMMANDS, CORE_TOOLS, MEMORY_FILING_TOOLS, SYSTEM_SUPPORT_TOOLS, UPSTREAM_DOCUMENTED_MCP_TOOLS } from "./constants";
 import type { MemPalaceRuntime } from "./runtime";
+import { describeAutoIngestState } from "./auto-ingest-policy.js";
 import {
 	getMemPalaceSetupGuidance,
 	getMemPalaceSetupGuidanceFromExec,
@@ -25,7 +26,7 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			queuePrompt(
 				pi,
 				ctx,
-				"Use the mempalace_instructions tool with name \"help\". Then give me a concise overview of the available MemPalace commands, tools, and workflows.",
+				"Use the mempalace_instructions tool with name \"help\". Then give me a concise overview of the available MemPalace slash commands, MCP tools, save hooks, and palace architecture.",
 			);
 		},
 	});
@@ -39,7 +40,8 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 				ctx,
 				[
 					`Set up MemPalace for this directory: ${quoteArg(directory)}.`,
-					"Use the mempalace_instructions tool with name \"init\" for the guided flow, and use mempalace_init when you are ready to initialize the directory.",
+					"Use the mempalace_instructions tool with name \"init\" for the guided flow, including install, MCP setup, initialization, and verification.",
+					"Use mempalace_init when you are ready to initialize the directory.",
 				].join(" "),
 			);
 		},
@@ -56,7 +58,7 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			queuePrompt(
 				pi,
 				ctx,
-				`Search my MemPalace for ${quoteArg(query)}. Use the mempalace_search tool directly, and summarize the results with source attribution if anything is found.`,
+				`Search my MemPalace for ${quoteArg(query)}. Use mempalace_search directly, discover taxonomy first if you need wing/room resolution, and summarize results with source attribution and relevant room/wing context.`,
 			);
 		},
 	});
@@ -70,7 +72,8 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 				ctx,
 				[
 					`Mine this source into MemPalace: ${quoteArg(source)}.`,
-					"Use the mempalace_mine tool. If the source type is ambiguous, ask me whether it is a project directory or conversation export before proceeding.",
+					"Use the mempalace_instructions tool with name \"mine\" if you need the guided flow.",
+					"Use mempalace_mine, ask whether the source is project or conversations if ambiguous, and suggest split/dry-run when large files are likely.",
 				].join(" "),
 			);
 		},
@@ -82,7 +85,7 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			queuePrompt(
 				pi,
 				ctx,
-				"Use the mempalace_status tool and give me a quick MemPalace health summary with counts and one suggested next action.",
+				"Use mempalace_status for the palace overview. If mempalace_kg_stats or mempalace_graph_stats are available, include them in a quick-glance status summary and suggest one relevant next action.",
 			);
 		},
 	});
@@ -102,6 +105,8 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			const pythonProbe = await probePythonEnvironment(pi).catch(() => undefined);
 
 			const { client, tools: mcpTools } = await runtime.ensureMcpConnected();
+			await runtime.refreshHookSettings();
+			const filedAway = await runtime.acknowledgeMemoriesFiledAway();
 			runtime.registerDiscoveredMcpTools();
 			lines.push(`mcp bridge: ${client ? "ok" : `unavailable (${runtime.mcpStartupError || "unknown error"})`}`);
 			const mcpGuidance = refineSetupGuidance(getMemPalaceSetupGuidance(runtime.mcpStartupError), pythonProbe);
@@ -112,10 +117,17 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 				lines.push(`python visibility in Pi:\n${summarizePythonProbe(pythonProbe).join("\n")}`);
 			}
 			if (client) {
+				const toolNames = mcpTools.map((tool) => tool.name).sort();
+				const missingDocumented = UPSTREAM_DOCUMENTED_MCP_TOOLS.filter((name) => !toolNames.includes(name));
+				const availableMemoryFiling = MEMORY_FILING_TOOLS.filter((name) => toolNames.includes(name));
+				const availableSystemTools = SYSTEM_SUPPORT_TOOLS.filter((name) => toolNames.includes(name));
 				lines.push(`mcp command: ${client.getCommandLine()}`);
 				lines.push(`mcp tool count: ${mcpTools.length}`);
 				lines.push(`mcp registered dynamically: ${[...runtime.registeredMcpTools].sort().join(", ") || "none"}`);
 				lines.push(`mcp disabled tools: ${[...runtime.disabledMcpTools].sort().join(", ") || "none"}`);
+				lines.push(`memory filing tools available: ${availableMemoryFiling.join(", ") || "none"}`);
+				lines.push(`system support tools available: ${availableSystemTools.join(", ") || "none"}`);
+				lines.push(`upstream documented tools missing from current MCP server: ${missingDocumented.join(", ") || "none"}`);
 			} else if (runtime.getMcpStderr()) {
 				lines.push(`mcp stderr:\n${truncate(runtime.getMcpStderr(), 2000)}`);
 			}
@@ -123,9 +135,24 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			if (runtime.lastMcpToolError) {
 				lines.push(`last mcp tool error: ${runtime.lastMcpToolError}`);
 			}
+			lines.push(
+				`hook settings: silent_save=${runtime.hookSettings.silent_save}, desktop_toast=${runtime.hookSettings.desktop_toast} (source=${runtime.hookSettings.source}, updated=${runtime.hookSettings.updatedAt})`,
+			);
 
 			lines.push(`cwd: ${ctx.cwd}`);
+			lines.push(`session file: ${ctx.sessionManager.getSessionFile?.() || "ephemeral"}`);
 			lines.push(`MEMPAL_DIR: ${process.env.MEMPAL_DIR?.trim() || "not set"}`);
+			if (runtime.lastAutoIngest?.started) {
+				const target = `${runtime.lastAutoIngest.targetSource}:${runtime.lastAutoIngest.targetPath}`;
+				const status = describeAutoIngestState(runtime.lastAutoIngest);
+				lines.push(`last auto-ingest: ${target} (${status} at ${runtime.lastAutoIngest.timestamp})`);
+			}
+			if (filedAway) {
+				lines.push(`memories filed away: ${filedAway.status} (${filedAway.message || "no message"}) checked ${filedAway.checkedAt}`);
+			}
+			if (runtime.lastReconnect) {
+				lines.push(`last reconnect: ${runtime.lastReconnect.success ? runtime.lastReconnect.message || "success" : runtime.lastReconnect.error || "failed"} checked ${runtime.lastReconnect.checkedAt}`);
+			}
 
 			const versionRun = await runMemPalace(pi, ["--help"]);
 			lines.push(`cli probe: ${versionRun.result.code === 0 ? "ok" : `failed (exit ${versionRun.result.code})`}`);

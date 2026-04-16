@@ -25,11 +25,19 @@ export function registerTools(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 		parameters: Type.Object({
 			name: StringEnum(["help", "init", "search", "mine", "status"] as const),
 		}),
-		async execute(_toolCallId, params) {
-			const text = getBundledInstructions(params.name);
+		async execute(_toolCallId, params, signal) {
+			const bundled = getBundledInstructions(params.name);
+			const instructionRun = await runMemPalace(pi, ["instructions", params.name], signal).catch(() => undefined);
+			if (instructionRun?.result.code === 0 && instructionRun.result.stdout.trim()) {
+				return {
+					content: [{ type: "text" as const, text: instructionRun.result.stdout.trim() }],
+					details: { source: "cli", name: params.name, command: instructionRun.command },
+					isError: false,
+				};
+			}
 			return {
-				content: [{ type: "text" as const, text }],
-				details: { source: "bundled", name: params.name },
+				content: [{ type: "text" as const, text: bundled }],
+				details: { source: "bundled", name: params.name, fallback: true },
 				isError: false,
 			};
 		},
@@ -64,6 +72,9 @@ export function registerTools(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			const { command, result } = await runMemPalace(pi, ["init", directory], signal);
 			const guidance = getMemPalaceSetupGuidanceFromExec(command, result) || getMemPalaceSetupGuidance(runtime.mcpStartupError);
 			if (result.code !== 0 && guidance) return unavailableToolResult("MemPalace init", guidance, command, result);
+			if (result.code === 0) {
+				await runtime.reconnectPalace(signal);
+			}
 			return toolResult("MemPalace init", command, result);
 		},
 	});
@@ -111,6 +122,7 @@ export function registerTools(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			const outputs: string[] = [];
 			const details: Record<string, unknown> = { sourcePath };
 			let failed = false;
+			let reconnected = false;
 
 			if (params.split && params.split !== "none") {
 				const splitArgs = ["split", sourcePath];
@@ -137,6 +149,14 @@ export function registerTools(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			outputs.push(formatExecOutput("MemPalace mine", mineRun.command, mineRun.result));
 			details.mine = { command: mineRun.command, exitCode: mineRun.result.code };
 			if (mineRun.result.code !== 0) failed = true;
+			if (mineRun.result.code === 0) {
+				const reconnect = await runtime.reconnectPalace(signal);
+				reconnected = Boolean(reconnect?.success);
+				details.reconnect = reconnect;
+				if (reconnected) {
+					outputs.push("MemPalace reconnect: refreshed MCP state after CLI mine");
+				}
+			}
 
 			return {
 				content: [{ type: "text" as const, text: outputs.join("\n\n") }],
