@@ -104,11 +104,14 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 
 			const pythonProbe = await probePythonEnvironment(pi).catch(() => undefined);
 
+			const { tools: localTools } = await runtime.ensureLocalFallbackTools();
 			const { client, tools: mcpTools } = await runtime.ensureMcpConnected();
 			await runtime.refreshHookSettings();
 			const filedAway = await runtime.acknowledgeMemoriesFiledAway();
 			runtime.registerDiscoveredMcpTools();
+			runtime.registerDiscoveredFallbackTools();
 			lines.push(`mcp bridge: ${client ? "ok" : `unavailable (${runtime.mcpStartupError || "unknown error"})`}`);
+			lines.push(`mcp circuit: ${runtime.mcpCircuitOpen ? `open (${runtime.mcpCircuitReason || "unknown reason"})${runtime.mcpCircuitOpenedAt ? ` since ${runtime.mcpCircuitOpenedAt}` : ""}` : "closed"}`);
 			const mcpGuidance = refineSetupGuidance(getMemPalaceSetupGuidance(runtime.mcpStartupError), pythonProbe);
 			if (mcpGuidance) {
 				lines.push(`mcp setup required: ${mcpGuidance}`);
@@ -116,6 +119,8 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 			if (pythonProbe) {
 				lines.push(`python visibility in Pi:\n${summarizePythonProbe(pythonProbe).join("\n")}`);
 			}
+			lines.push(`local fallback discovery: ${localTools.length > 0 ? `ok (${localTools.length} tools)` : `unavailable (${runtime.localFallbackError || "no tools discovered"})`}`);
+			lines.push(`fallback-registered dynamic tools: ${[...runtime.registeredFallbackTools].sort().join(", ") || "none"}`);
 			if (client) {
 				const toolNames = mcpTools.map((tool) => tool.name).sort();
 				const missingDocumented = UPSTREAM_DOCUMENTED_MCP_TOOLS.filter((name) => !toolNames.includes(name));
@@ -134,6 +139,11 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 
 			if (runtime.lastMcpToolError) {
 				lines.push(`last mcp tool error: ${runtime.lastMcpToolError}`);
+			}
+			if (runtime.lastFallback) {
+				lines.push(
+					`last fallback: ${runtime.lastFallback.toolName} via ${runtime.lastFallback.transport} (${runtime.lastFallback.success ? "success" : "failed"})${runtime.lastFallback.reason ? ` — ${runtime.lastFallback.reason}` : ""} checked ${runtime.lastFallback.checkedAt}`,
+				);
 			}
 			lines.push(
 				`hook settings: silent_save=${runtime.hookSettings.silent_save}, desktop_toast=${runtime.hookSettings.desktop_toast} (source=${runtime.hookSettings.source}, updated=${runtime.hookSettings.updatedAt})`,
@@ -174,12 +184,13 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 				lines.push(`status stderr:\n${truncate(statusRun.result.stderr.trim(), 2000)}`);
 			}
 
+			const backendUnavailable = !client && localTools.length === 0 && (!!mcpGuidance || !!cliGuidance || !!runtime.localFallbackError);
 			const unavailableTools = [
 				"mempalace_status",
 				"mempalace_init",
 				"mempalace_search",
 				"mempalace_mine",
-			].filter(() => !!mcpGuidance || !!cliGuidance);
+			].filter(() => backendUnavailable);
 			lines.push(`bundled tools always available: mempalace_instructions`);
 			lines.push(`backend-dependent tools: ${unavailableTools.length > 0 ? `unavailable (${unavailableTools.join(", ")})` : "ok"}`);
 
@@ -188,7 +199,7 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 				missingTools.length === 0 &&
 				versionRun.result.code === 0 &&
 				statusRun.result.code === 0 &&
-				!!client;
+				(!!client || localTools.length > 0);
 			const report = lines.join("\n\n");
 
 			pi.sendMessage({

@@ -19,8 +19,10 @@ A pi package that brings core MemPalace workflows to pi.
   - `mempalace_status`
 - MCP bridge:
   - starts `python3 -m mempalace.mcp_server` when available
+  - enforces bounded MCP startup and request timeouts so stalled MCP calls fail fast instead of hanging the agent indefinitely
   - dynamically exposes the MemPalace MCP tool surface to the agent, including write and system tools when the installed server provides them
-  - uses MCP for `mempalace_status` and `mempalace_search` when possible, with CLI fallback
+  - discovers the same MemPalace tool surface directly from the local Python package so dynamic tools remain available even when the MCP transport is unavailable
+  - uses MCP for `mempalace_status` and `mempalace_search` when possible, with CLI fallback; other dynamically surfaced MemPalace tools fall back to the local Python backend when MCP fails
   - fails gracefully when Python or the `mempalace` Python package is missing, without crashing pi
   - shows an in-app setup notice when MemPalace cannot start because dependencies are missing
 - Session hooks:
@@ -79,7 +81,7 @@ After installation, restart pi or run `/reload`, then use:
 - `/mempalace:search auth token rotation`
 - `/mempalace:mine .`
 
-Use `/mempalace:doctor` to see whether CLI/bundled help is available, whether the MCP bridge is connected, which memory-filing/system tools are reachable, whether recent auto-ingest ran, whether `memories_filed_away` acknowledged a silent checkpoint, whether reconnect was recently needed after CLI writes, and which upstream-documented tools are missing from the currently installed MemPalace server.
+Use `/mempalace:doctor` to see whether CLI/bundled help is available, whether the MCP bridge is connected, whether the MCP circuit breaker is open, whether the local fallback backend is ready, which memory-filing/system tools are reachable, whether recent auto-ingest ran, whether `memories_filed_away` acknowledged a silent checkpoint, whether reconnect was recently needed after CLI writes, which fallback path ran most recently, and which upstream-documented tools are missing from the currently installed MemPalace server.
 
 See [`docs/claude-plugin-parity.md`](docs/claude-plugin-parity.md) for the current Claude-plugin parity matrix and documented Pi-specific deviations.
 
@@ -124,7 +126,7 @@ This avoids putting helper modules inside an auto-discovered `extensions/` direc
 
 ## Notes
 
-This extension includes a built-in MCP bridge for `mempalace.mcp_server`, so Pi agents can use the structured MemPalace tool surface when the MCP server is available. For compatibility, the package keeps CLI-backed fallbacks for setup, mining, instructions, and for status/search if MCP cannot be started.
+This extension includes a built-in MCP bridge for `mempalace.mcp_server`, so Pi agents can use the structured MemPalace tool surface when the MCP server is available. For compatibility, the package keeps CLI-backed fallbacks for setup, mining, instructions, and for status/search if MCP cannot be started, and it can execute dynamically surfaced MemPalace tools directly through the local Python package when the MCP transport fails or is unavailable.
 
 On save checkpoints and pre-compaction, the extension tries to preserve memory by mining the best available target in this order:
 1. `MEMPAL_DIR`

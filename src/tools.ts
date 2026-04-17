@@ -52,10 +52,7 @@ export function registerTools(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 		async execute(_toolCallId, _params, signal) {
 			const mcpResult = await runtime.maybeCallMcpTool("mempalace_status", {}, signal);
 			if (mcpResult) return mcpResult;
-			const { command, result } = await runMemPalace(pi, ["status"], signal);
-			const guidance = getMemPalaceSetupGuidanceFromExec(command, result) || getMemPalaceSetupGuidance(runtime.mcpStartupError);
-			if (result.code !== 0 && guidance) return unavailableToolResult("MemPalace status", guidance, command, result);
-			return toolResult("MemPalace status", command, result);
+			return runtime.runFallbackTool("mempalace_status", {}, signal, runtime.mcpStartupError || runtime.lastMcpToolError || "MCP unavailable");
 		},
 	});
 
@@ -95,13 +92,12 @@ export function registerTools(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 		async execute(_toolCallId, params, signal) {
 			const mcpResult = await runtime.maybeCallMcpTool("mempalace_search", params as Record<string, unknown>, signal);
 			if (mcpResult) return mcpResult;
-			const args = ["search", params.query];
-			if (params.wing) args.push("--wing", params.wing);
-			if (params.room) args.push("--room", params.room);
-			const { command, result } = await runMemPalace(pi, args, signal);
-			const guidance = getMemPalaceSetupGuidanceFromExec(command, result) || getMemPalaceSetupGuidance(runtime.mcpStartupError);
-			if (result.code !== 0 && guidance) return unavailableToolResult("MemPalace search", guidance, command, result);
-			return toolResult("MemPalace search", command, result);
+			return runtime.runFallbackTool(
+				"mempalace_search",
+				params as Record<string, unknown>,
+				signal,
+				runtime.mcpStartupError || runtime.lastMcpToolError || "MCP unavailable",
+			);
 		},
 	});
 

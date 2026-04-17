@@ -16,11 +16,17 @@ import {
 export function registerHooks(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 	pi.on("session_start", async (_event, ctx) => {
 		runtime.loadState(ctx);
+		const { tools: localTools } = await runtime.ensureLocalFallbackTools();
 		const { tools } = await runtime.ensureMcpConnected();
 		await runtime.refreshHookSettings();
 		runtime.registerDiscoveredMcpTools();
+		runtime.registerDiscoveredFallbackTools();
 		if (ctx.hasUI && tools.length > 0) {
 			ctx.ui.notify(`MemPalace MCP connected (${tools.length} tools)`, "success");
+			return;
+		}
+		if (ctx.hasUI && localTools.length > 0) {
+			ctx.ui.notify(`MemPalace local fallback ready (${localTools.length} tools)`, "info");
 			return;
 		}
 

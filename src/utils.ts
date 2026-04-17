@@ -253,7 +253,7 @@ export function unavailableToolResult(
 	guidance: string,
 	command?: string[],
 	result?: ExecResult,
-	transport?: "cli" | "mcp",
+	transport?: "cli" | "mcp" | "python",
 ) {
 	const details: Record<string, unknown> = {
 		unavailable: true,

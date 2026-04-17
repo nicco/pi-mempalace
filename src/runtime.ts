@@ -1,13 +1,15 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { getDefaultPiHookSettings, normalizeHookSettingsPayload } from "./hook-settings-policy.js";
 import { getMcpPromptGuidelines } from "./constants";
-import { MemPalaceMcpClient, mcpToolSchemaToTypeBox, normalizeMcpToolResult } from "./mcp-client";
+import { callLocalMemPalaceTool, discoverLocalMemPalaceTools, hasStructuredToolFailure } from "./local-backend";
+import { MemPalaceMcpClient, type McpToolDefinition, mcpToolSchemaToTypeBox, normalizeMcpToolResult } from "./mcp-client";
 import type { AutoIngestOutcome } from "./utils";
+import { getMemPalaceSetupGuidance, getMemPalaceSetupGuidanceFromExec, runMemPalace, toolResult, unavailableToolResult } from "./utils";
 
 export type PiHookSettings = {
 	silent_save: boolean;
 	desktop_toast: boolean;
-	source: "default" | "mcp";
+	source: "default" | "mcp" | "python";
 	updatedAt: string;
 };
 
@@ -16,7 +18,7 @@ export type MemoriesFiledAwayState = {
 	message?: string;
 	count?: number;
 	timestamp?: string | null;
-	source: "mcp";
+	source: "mcp" | "python";
 	checkedAt: string;
 };
 
@@ -25,7 +27,16 @@ export type ReconnectState = {
 	message?: string;
 	error?: string;
 	drawers?: number;
-	source: "mcp";
+	source: "mcp" | "python";
+	checkedAt: string;
+};
+
+export type LocalFallbackState = {
+	toolName: string;
+	transport: "python" | "cli";
+	reason?: string;
+	success: boolean;
+	detail?: string;
 	checkedAt: string;
 };
 
@@ -40,12 +51,21 @@ export class MemPalaceRuntime {
 	};
 	lastMemoriesFiledAway?: MemoriesFiledAwayState;
 	lastReconnect?: ReconnectState;
+	lastFallback?: LocalFallbackState;
 	private mcpClient?: MemPalaceMcpClient;
 	mcpStartupError?: string;
 	lastMcpToolError?: string;
+	localFallbackError?: string;
 	hasShownSetupNotice = false;
+	mcpCircuitOpen = false;
+	mcpCircuitReason?: string;
+	mcpCircuitOpenedAt?: string;
 	readonly registeredMcpTools = new Set<string>();
+	readonly registeredFallbackTools = new Set<string>();
+	readonly registeredDynamicTools = new Set<string>();
 	readonly disabledMcpTools = new Set<string>();
+	private localFallbackToolsDiscovered = false;
+	private localFallbackTools: McpToolDefinition[] = [];
 
 	constructor(private readonly pi: ExtensionAPI) {}
 
@@ -54,7 +74,32 @@ export class MemPalaceRuntime {
 		return this.mcpClient;
 	}
 
+	async ensureLocalFallbackTools(signal?: AbortSignal) {
+		if (this.localFallbackToolsDiscovered) {
+			return { tools: this.localFallbackTools };
+		}
+		try {
+			const { command, result, tools } = await discoverLocalMemPalaceTools(this.pi, signal);
+			if (result.code !== 0) {
+				this.localFallbackError = getMemPalaceSetupGuidanceFromExec(command, result) || result.stderr.trim() || result.stdout.trim();
+				return { tools: [] };
+			}
+			this.localFallbackError = undefined;
+			this.localFallbackTools = tools;
+			this.localFallbackToolsDiscovered = true;
+			this.registerDiscoveredFallbackTools();
+			return { tools };
+		} catch (error) {
+			this.localFallbackError = error instanceof Error ? error.message : String(error);
+			return { tools: [] };
+		}
+	}
+
 	async ensureMcpConnected(signal?: AbortSignal) {
+		if (this.mcpCircuitOpen) {
+			this.mcpStartupError = this.mcpCircuitReason || this.mcpStartupError;
+			return { tools: [] };
+		}
 		try {
 			const client = this.getMcpClient();
 			const { tools } = await client.connect(signal);
@@ -62,12 +107,13 @@ export class MemPalaceRuntime {
 			this.registerDiscoveredMcpTools();
 			return { client, tools };
 		} catch (error) {
-			this.mcpStartupError = error instanceof Error ? error.message : String(error);
+			const detail = error instanceof Error ? error.message : String(error);
+			await this.tripMcpCircuit(detail);
 			return { tools: [] };
 		}
 	}
 
-	private applyHookSettings(payload: unknown, source: "default" | "mcp") {
+	private applyHookSettings(payload: unknown, source: "default" | "mcp" | "python") {
 		const normalized = normalizeHookSettingsPayload(payload);
 		this.hookSettings = {
 			...normalized,
@@ -77,10 +123,11 @@ export class MemPalaceRuntime {
 	}
 
 	async refreshHookSettings(signal?: AbortSignal) {
-		const result = await this.maybeCallMcpTool("mempalace_hook_settings", {}, signal);
+		const result = (await this.maybeCallMcpTool("mempalace_hook_settings", {}, signal)) ||
+			(await this.runLocalFallbackTool("mempalace_hook_settings", {}, signal, this.describeFallbackReason("mempalace_hook_settings")));
 		const parsed = result?.details?.parsed;
 		if (parsed && typeof parsed === "object") {
-			this.applyHookSettings(parsed, "mcp");
+			this.applyHookSettings(parsed, result?.details?.transport === "python" ? "python" : "mcp");
 			return this.hookSettings;
 		}
 		if (!this.hookSettings || this.hookSettings.source !== "default") {
@@ -90,7 +137,8 @@ export class MemPalaceRuntime {
 	}
 
 	async acknowledgeMemoriesFiledAway(signal?: AbortSignal) {
-		const result = await this.maybeCallMcpTool("mempalace_memories_filed_away", {}, signal);
+		const result = (await this.maybeCallMcpTool("mempalace_memories_filed_away", {}, signal)) ||
+			(await this.runLocalFallbackTool("mempalace_memories_filed_away", {}, signal, this.describeFallbackReason("mempalace_memories_filed_away")));
 		const parsed = result?.details?.parsed;
 		if (!parsed || typeof parsed !== "object") return undefined;
 		const record = {
@@ -100,7 +148,7 @@ export class MemPalaceRuntime {
 			timestamp: typeof (parsed as { timestamp?: unknown }).timestamp === "string" || (parsed as { timestamp?: unknown }).timestamp === null
 				? ((parsed as { timestamp?: string | null }).timestamp ?? null)
 				: undefined,
-			source: "mcp" as const,
+			source: result?.details?.transport === "python" ? ("python" as const) : ("mcp" as const),
 			checkedAt: new Date().toISOString(),
 		};
 		this.lastMemoriesFiledAway = record;
@@ -108,7 +156,8 @@ export class MemPalaceRuntime {
 	}
 
 	async reconnectPalace(signal?: AbortSignal) {
-		const result = await this.maybeCallMcpTool("mempalace_reconnect", {}, signal);
+		const result = (await this.maybeCallMcpTool("mempalace_reconnect", {}, signal)) ||
+			(await this.runLocalFallbackTool("mempalace_reconnect", {}, signal, this.describeFallbackReason("mempalace_reconnect")));
 		const parsed = result?.details?.parsed;
 		if (!parsed || typeof parsed !== "object") return undefined;
 		const record = {
@@ -116,7 +165,7 @@ export class MemPalaceRuntime {
 			message: typeof (parsed as { message?: unknown }).message === "string" ? (parsed as { message: string }).message : undefined,
 			error: typeof (parsed as { error?: unknown }).error === "string" ? (parsed as { error: string }).error : undefined,
 			drawers: typeof (parsed as { drawers?: unknown }).drawers === "number" ? (parsed as { drawers: number }).drawers : undefined,
-			source: "mcp" as const,
+			source: result?.details?.transport === "python" ? ("python" as const) : ("mcp" as const),
 			checkedAt: new Date().toISOString(),
 		};
 		this.lastReconnect = record;
@@ -124,7 +173,7 @@ export class MemPalaceRuntime {
 	}
 
 	async maybeCallMcpTool(toolName: string, args: Record<string, unknown>, signal?: AbortSignal) {
-		if (this.disabledMcpTools.has(toolName)) return undefined;
+		if (this.mcpCircuitOpen || this.disabledMcpTools.has(toolName)) return undefined;
 		const { client } = await this.ensureMcpConnected(signal);
 		if (!client) return undefined;
 		const available = client.getTools().some((tool) => tool.name === toolName);
@@ -142,69 +191,149 @@ export class MemPalaceRuntime {
 				isError: false,
 			};
 		} catch (error) {
-			this.lastMcpToolError = error instanceof Error ? error.message : String(error);
+			const detail = error instanceof Error ? error.message : String(error);
+			this.lastMcpToolError = detail;
 			this.disabledMcpTools.add(toolName);
-			await this.shutdown();
+			await this.tripMcpCircuit(detail);
 			return undefined;
 		}
 	}
 
-	registerDiscoveredMcpTools() {
-		const runtime = this;
-		for (const tool of this.mcpClient?.getTools() ?? []) {
-			if (runtime.registeredMcpTools.has(tool.name)) continue;
-			if (["mempalace_status", "mempalace_search"].includes(tool.name)) continue;
-			runtime.registeredMcpTools.add(tool.name);
-			runtime.pi.registerTool({
-				name: tool.name,
-				label: tool.name,
-				description: tool.description || `MemPalace MCP tool: ${tool.name}`,
-				promptSnippet: tool.description || `Use the MemPalace MCP tool ${tool.name}`,
-				promptGuidelines: getMcpPromptGuidelines(tool.name),
-				parameters: mcpToolSchemaToTypeBox(tool),
-				async execute(_toolCallId, params, signal) {
-					if (runtime.disabledMcpTools.has(tool.name)) {
-						return {
-							content: [{ type: "text" as const, text: `MemPalace MCP tool disabled after previous failure: ${runtime.lastMcpToolError || tool.name}` }],
-							details: { transport: "mcp", disabled: true, error: runtime.lastMcpToolError, toolName: tool.name },
-							isError: true,
-						};
-					}
-
-					const { client } = await runtime.ensureMcpConnected(signal);
-					if (!client) {
-						return {
-							content: [{ type: "text" as const, text: `MemPalace MCP unavailable: ${runtime.mcpStartupError || "unknown error"}` }],
-							details: { transport: "mcp", unavailable: true, error: runtime.mcpStartupError },
-							isError: true,
-						};
-					}
-
-					try {
-						const result = await client.callTool(tool.name, params as Record<string, unknown>, signal);
-						runtime.lastMcpToolError = undefined;
-						const normalized = normalizeMcpToolResult(result);
-						if (tool.name === "mempalace_hook_settings") {
-							runtime.applyHookSettings(normalized.parsed, "mcp");
-						}
-						return {
-							content: normalized.content,
-							details: { transport: "mcp", toolName: tool.name, ...normalized.details },
-							isError: false,
-						};
-					} catch (error) {
-						runtime.lastMcpToolError = error instanceof Error ? error.message : String(error);
-						runtime.disabledMcpTools.add(tool.name);
-						await runtime.shutdown();
-						return {
-							content: [{ type: "text" as const, text: `MemPalace MCP tool failed: ${runtime.lastMcpToolError}` }],
-							details: { transport: "mcp", toolName: tool.name, error: runtime.lastMcpToolError },
-							isError: true,
-						};
-					}
-				},
-			});
+	async runFallbackTool(toolName: string, args: Record<string, unknown>, signal?: AbortSignal, reason?: string) {
+		if (toolName === "mempalace_status") {
+			return this.runCliFallbackTool("MemPalace status", ["status"], toolName, signal, reason);
 		}
+		if (toolName === "mempalace_search" && typeof args.query === "string") {
+			const commandArgs = ["search", args.query];
+			if (typeof args.wing === "string") commandArgs.push("--wing", args.wing);
+			if (typeof args.room === "string") commandArgs.push("--room", args.room);
+			return this.runCliFallbackTool("MemPalace search", commandArgs, toolName, signal, reason);
+		}
+		return this.runLocalFallbackTool(toolName, args, signal, reason);
+	}
+
+	private async runCliFallbackTool(
+		label: string,
+		commandArgs: string[],
+		toolName: string,
+		signal?: AbortSignal,
+		reason?: string,
+	) {
+		const { command, result } = await runMemPalace(this.pi, commandArgs, signal);
+		const guidance = getMemPalaceSetupGuidanceFromExec(command, result) || getMemPalaceSetupGuidance(this.mcpStartupError);
+		if (result.code !== 0 && guidance) {
+			this.recordFallback(toolName, "cli", false, reason, guidance);
+			return unavailableToolResult(label, guidance, command, result, "cli");
+		}
+		this.recordFallback(toolName, "cli", result.code === 0, reason, result.stderr.trim() || undefined);
+		const output = toolResult(label, command, result);
+		return {
+			...output,
+			details: { ...output.details, transport: "cli", fallback: true, fallbackReason: reason, toolName },
+		};
+	}
+
+	private async runLocalFallbackTool(toolName: string, args: Record<string, unknown>, signal?: AbortSignal, reason?: string) {
+		await this.ensureLocalFallbackTools(signal);
+		const available = this.localFallbackTools.some((tool) => tool.name === toolName);
+		if (!available) {
+			const detail = this.localFallbackError || `No local MemPalace fallback is available for ${toolName}.`;
+			this.recordFallback(toolName, "python", false, reason, detail);
+			return {
+				content: [{ type: "text" as const, text: `MemPalace fallback unavailable for ${toolName}: ${detail}` }],
+				details: { transport: "python", toolName, unavailable: true, reason, error: detail },
+				isError: true,
+			};
+		}
+
+		const run = await callLocalMemPalaceTool(this.pi, toolName, args, signal);
+		const guidance = getMemPalaceSetupGuidanceFromExec(run.command, run.result) || getMemPalaceSetupGuidance(this.mcpStartupError);
+		if (run.result.code !== 0 && guidance) {
+			this.recordFallback(toolName, "python", false, reason, guidance);
+			return unavailableToolResult(`MemPalace fallback (${toolName})`, guidance, run.command, run.result, "python");
+		}
+
+		const isError = run.result.code !== 0 || hasStructuredToolFailure(run.parsed);
+		const text = run.result.code === 0 ? run.text : `MemPalace local fallback failed for ${toolName}: ${run.text}`;
+		this.recordFallback(toolName, "python", !isError, reason, typeof run.parsed === "string" ? run.parsed : undefined);
+		return {
+			content: [{ type: "text" as const, text }],
+			details: {
+				transport: "python",
+				fallback: true,
+				fallbackReason: reason,
+				toolName,
+				command: run.command,
+				stdout: run.result.stdout,
+				stderr: run.result.stderr,
+				exitCode: run.result.code,
+				parsed: run.parsed,
+			},
+			isError,
+		};
+	}
+
+	private async tripMcpCircuit(reason: string) {
+		this.mcpCircuitOpen = true;
+		this.mcpCircuitReason = reason;
+		this.mcpCircuitOpenedAt = new Date().toISOString();
+		this.mcpStartupError = reason;
+		await this.shutdown();
+	}
+
+	private describeFallbackReason(toolName: string) {
+		if (this.mcpCircuitOpen) return `MCP circuit open: ${this.mcpCircuitReason || toolName}`;
+		if (this.disabledMcpTools.has(toolName) && this.lastMcpToolError) return `MCP disabled after failure: ${this.lastMcpToolError}`;
+		if (this.lastMcpToolError) return `MCP failure: ${this.lastMcpToolError}`;
+		if (this.mcpStartupError) return `MCP unavailable: ${this.mcpStartupError}`;
+		return "MCP unavailable";
+	}
+
+	private recordFallback(toolName: string, transport: "python" | "cli", success: boolean, reason?: string, detail?: string) {
+		this.lastFallback = {
+			toolName,
+			transport,
+			reason,
+			success,
+			detail,
+			checkedAt: new Date().toISOString(),
+		};
+	}
+
+	registerDiscoveredFallbackTools() {
+		for (const tool of this.localFallbackTools) {
+			if (this.registeredFallbackTools.has(tool.name)) continue;
+			if (["mempalace_status", "mempalace_search"].includes(tool.name)) continue;
+			this.registeredFallbackTools.add(tool.name);
+			this.registerDynamicTool(tool);
+		}
+	}
+
+	registerDiscoveredMcpTools() {
+		for (const tool of this.mcpClient?.getTools() ?? []) {
+			if (this.registeredMcpTools.has(tool.name)) continue;
+			if (["mempalace_status", "mempalace_search"].includes(tool.name)) continue;
+			this.registeredMcpTools.add(tool.name);
+			this.registerDynamicTool(tool);
+		}
+	}
+
+	private registerDynamicTool(tool: McpToolDefinition) {
+		if (this.registeredDynamicTools.has(tool.name)) return;
+		this.registeredDynamicTools.add(tool.name);
+		this.pi.registerTool({
+			name: tool.name,
+			label: tool.name,
+			description: tool.description || `MemPalace dynamic tool: ${tool.name}`,
+			promptSnippet: tool.description || `Use the MemPalace tool ${tool.name}`,
+			promptGuidelines: getMcpPromptGuidelines(tool.name),
+			parameters: mcpToolSchemaToTypeBox(tool),
+			execute: async (_toolCallId, params, signal) => {
+				const mcpResult = await this.maybeCallMcpTool(tool.name, params as Record<string, unknown>, signal);
+				if (mcpResult) return mcpResult;
+				return this.runFallbackTool(tool.name, params as Record<string, unknown>, signal, this.describeFallbackReason(tool.name));
+			},
+		});
 	}
 
 	recordAutoIngest(outcome: AutoIngestOutcome) {
@@ -222,6 +351,10 @@ export class MemPalaceRuntime {
 			lastAutoIngest: this.lastAutoIngest,
 			lastMemoriesFiledAway: this.lastMemoriesFiledAway,
 			lastReconnect: this.lastReconnect,
+			lastFallback: this.lastFallback,
+			mcpCircuitOpen: this.mcpCircuitOpen,
+			mcpCircuitReason: this.mcpCircuitReason,
+			mcpCircuitOpenedAt: this.mcpCircuitOpenedAt,
 			updatedAt: Date.now(),
 		});
 	}
@@ -232,6 +365,10 @@ export class MemPalaceRuntime {
 		this.lastAutoIngest = undefined;
 		this.lastMemoriesFiledAway = undefined;
 		this.lastReconnect = undefined;
+		this.lastFallback = undefined;
+		this.mcpCircuitOpen = false;
+		this.mcpCircuitReason = undefined;
+		this.mcpCircuitOpenedAt = undefined;
 		this.hookSettings = {
 			...getDefaultPiHookSettings(),
 			source: "default",
@@ -245,6 +382,10 @@ export class MemPalaceRuntime {
 				lastAutoIngest?: (AutoIngestOutcome & { timestamp?: string }) | undefined;
 				lastMemoriesFiledAway?: MemoriesFiledAwayState | undefined;
 				lastReconnect?: ReconnectState | undefined;
+				lastFallback?: LocalFallbackState | undefined;
+				mcpCircuitOpen?: boolean;
+				mcpCircuitReason?: string;
+				mcpCircuitOpenedAt?: string;
 			} | undefined;
 			if (typeof data?.lastAutoSaveCount === "number") this.lastAutoSaveCount = data.lastAutoSaveCount;
 			if (typeof data?.lastPreCompactWarningKey === "string") this.lastPreCompactWarningKey = data.lastPreCompactWarningKey;
@@ -257,6 +398,12 @@ export class MemPalaceRuntime {
 			if (data?.lastReconnect && typeof data.lastReconnect.checkedAt === "string") {
 				this.lastReconnect = data.lastReconnect;
 			}
+			if (data?.lastFallback && typeof data.lastFallback.checkedAt === "string") {
+				this.lastFallback = data.lastFallback;
+			}
+			if (typeof data?.mcpCircuitOpen === "boolean") this.mcpCircuitOpen = data.mcpCircuitOpen;
+			if (typeof data?.mcpCircuitReason === "string") this.mcpCircuitReason = data.mcpCircuitReason;
+			if (typeof data?.mcpCircuitOpenedAt === "string") this.mcpCircuitOpenedAt = data.mcpCircuitOpenedAt;
 		}
 	}
 

@@ -31,6 +31,9 @@ type JsonRpcResponse = {
 	error?: { code?: number; message?: string };
 };
 
+const DEFAULT_MCP_CONNECT_TIMEOUT_MS = normalizeTimeout(process.env.MEMPALACE_MCP_CONNECT_TIMEOUT_MS, 8000);
+const DEFAULT_MCP_REQUEST_TIMEOUT_MS = normalizeTimeout(process.env.MEMPALACE_MCP_REQUEST_TIMEOUT_MS, 8000);
+
 export class MemPalaceMcpClient {
 	private child?: ChildProcessWithoutNullStreams;
 	private nextId = 1;
@@ -68,7 +71,7 @@ export class MemPalaceMcpClient {
 		const errors: Error[] = [];
 		for (const [command, args] of attempts) {
 			try {
-				await this.spawnAndInitialize(command, args, signal);
+				await this.spawnAndInitialize(command, args, signal, DEFAULT_MCP_CONNECT_TIMEOUT_MS);
 				return { commandLine: this.commandLine, tools: this.getTools() };
 			} catch (error) {
 				const normalized = error instanceof Error ? error : new Error(String(error));
@@ -101,7 +104,7 @@ export class MemPalaceMcpClient {
 		this.commandLine = "";
 	}
 
-	private async spawnAndInitialize(command: string, args: string[], signal?: AbortSignal): Promise<void> {
+	private async spawnAndInitialize(command: string, args: string[], signal?: AbortSignal, timeoutMs = DEFAULT_MCP_CONNECT_TIMEOUT_MS): Promise<void> {
 		this.stderrBuffer = "";
 		this.commandLine = [command, ...args].join(" ");
 		const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
@@ -141,9 +144,23 @@ export class MemPalaceMcpClient {
 		};
 		signal?.addEventListener("abort", abortStartup, { once: true });
 
+		let startupTimer: ReturnType<typeof setTimeout> | undefined;
+		const clearStartupTimer = () => {
+			if (!startupTimer) return;
+			clearTimeout(startupTimer);
+			startupTimer = undefined;
+		};
+		const startupTimeout = new Promise<never>((_, reject) => {
+			startupTimer = setTimeout(() => {
+				reject(this.createStartupError(command, `timed out after ${timeoutMs}ms during initialize/tools/list`));
+			}, timeoutMs);
+			signal?.addEventListener("abort", clearStartupTimer, { once: true });
+		});
+
 		try {
 			await Promise.race([
 				startupFailure,
+				startupTimeout,
 				(async () => {
 					await this.request(
 						"initialize",
@@ -164,7 +181,9 @@ export class MemPalaceMcpClient {
 				})(),
 			]);
 		} finally {
+			clearStartupTimer();
 			signal?.removeEventListener("abort", abortStartup);
+			signal?.removeEventListener("abort", clearStartupTimer);
 			if (startupComplete) {
 				rl.close();
 			}
@@ -197,12 +216,17 @@ export class MemPalaceMcpClient {
 		this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
 	}
 
-	private request(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+	private request(method: string, params: Record<string, unknown>, signal?: AbortSignal, timeoutMs = DEFAULT_MCP_REQUEST_TIMEOUT_MS): Promise<unknown> {
 		if (!this.child) throw new Error("MemPalace MCP server is not running.");
 		const id = this.nextId++;
 
 		return new Promise((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				this.pending.delete(id);
+				reject(new Error(`MemPalace MCP request timed out after ${timeoutMs}ms: ${method}`));
+			}, timeoutMs);
 			const abort = () => {
+				clearTimeout(timeout);
 				this.pending.delete(id);
 				reject(new Error(`MemPalace MCP request aborted: ${method}`));
 			};
@@ -211,10 +235,12 @@ export class MemPalaceMcpClient {
 
 			this.pending.set(id, {
 				resolve: (value) => {
+					clearTimeout(timeout);
 					signal?.removeEventListener("abort", abort);
 					resolve(value);
 				},
 				reject: (error) => {
+					clearTimeout(timeout);
 					signal?.removeEventListener("abort", abort);
 					reject(error);
 				},
@@ -243,6 +269,11 @@ export class MemPalaceMcpClient {
 		}
 		pending.resolve(message.result);
 	}
+}
+
+function normalizeTimeout(value: string | undefined, fallback: number): number {
+	const parsed = Number.parseInt(value || "", 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function schemaToType(schema: JsonSchema | undefined): unknown {

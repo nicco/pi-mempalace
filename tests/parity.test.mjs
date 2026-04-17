@@ -101,8 +101,9 @@ test("doctor reports parity-sensitive MCP visibility", () => {
 test("successful MCP connection auto-registers discovered tools and caches hook settings", () => {
 	const runtime = read("src/runtime.ts");
 	assert.match(runtime, /this\.registerDiscoveredMcpTools\(\)/);
+	assert.match(runtime, /registerDiscoveredFallbackTools/);
 	assert.match(runtime, /async refreshHookSettings/);
-	assert.match(runtime, /toolName === "mempalace_hook_settings"/);
+	assert.match(runtime, /"mempalace_hook_settings"/);
 	assert.match(runtime, /async acknowledgeMemoriesFiledAway/);
 	assert.match(runtime, /async reconnectPalace/);
 });
@@ -111,6 +112,54 @@ test("CLI write tools trigger reconnect after successful writes", () => {
 	const tools = read("src/tools.ts");
 	assert.match(tools, /await runtime\.reconnectPalace\(signal\)/);
 	assert.match(tools, /MemPalace reconnect: refreshed MCP state after CLI mine/);
+});
+
+
+test("MCP client enforces internal connect and request timeouts", () => {
+	const mcpClient = read("src/mcp-client.ts");
+	assert.match(mcpClient, /DEFAULT_MCP_CONNECT_TIMEOUT_MS/);
+	assert.match(mcpClient, /DEFAULT_MCP_REQUEST_TIMEOUT_MS/);
+	assert.match(mcpClient, /timed out after \$\{timeoutMs\}ms during initialize\/tools\/list/);
+	assert.match(mcpClient, /MemPalace MCP request timed out after \$\{timeoutMs\}ms: \$\{method\}/);
+});
+
+
+test("local backend discovers tools from MemPalace Python TOOLS and can call handlers without MCP transport", () => {
+	const backend = read("src/local-backend.ts");
+	assert.match(backend, /from mempalace\.mcp_server import TOOLS/);
+	assert.match(backend, /spec.get\("input_schema"\)/);
+	assert.match(backend, /tool\["handler"\]\(\*\*params\)/);
+	assert.match(backend, /fallback_supported/);
+});
+
+
+test("runtime opens an MCP circuit breaker and routes dynamic tools through fallback", () => {
+	const runtime = read("src/runtime.ts");
+	assert.match(runtime, /mcpCircuitOpen = false/);
+	assert.match(runtime, /tripMcpCircuit/);
+	assert.match(runtime, /this\.mcpCircuitOpen \|\| this\.disabledMcpTools\.has\(toolName\)/);
+	assert.match(runtime, /return this\.runFallbackTool\(tool\.name/);
+	assert.match(runtime, /registerDynamicTool/);
+	assert.match(runtime, /recordFallback\(/);
+});
+
+
+test("doctor and session start report fallback backend readiness and circuit state", () => {
+	const commands = read("src/commands.ts");
+	const hooks = read("src/hooks.ts");
+	assert.match(commands, /mcp circuit:/);
+	assert.match(commands, /local fallback discovery:/);
+	assert.match(commands, /fallback-registered dynamic tools:/);
+	assert.match(commands, /last fallback:/);
+	assert.match(hooks, /ensureLocalFallbackTools/);
+	assert.match(hooks, /MemPalace local fallback ready/);
+});
+
+
+test("status and search tools delegate fallback handling through the shared runtime", () => {
+	const tools = read("src/tools.ts");
+	assert.match(tools, /runtime\.runFallbackTool\("mempalace_status"/);
+	assert.match(tools, /runtime\.runFallbackTool\(\s*"mempalace_search"/);
 });
 
 test("repo docs include Claude-plugin parity documentation", () => {

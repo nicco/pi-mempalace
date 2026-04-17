@@ -12,4 +12,5 @@ export default function (pi: ExtensionAPI) {
 	registerTools(pi, runtime);
 	registerCommands(pi, runtime);
 	registerHooks(pi, runtime);
+	void runtime.ensureLocalFallbackTools();
 }
