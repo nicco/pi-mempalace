@@ -124,23 +124,34 @@ test("MCP client enforces internal connect and request timeouts", () => {
 });
 
 
-test("local backend discovers tools from MemPalace Python TOOLS and can call handlers without MCP transport", () => {
+test("local backend discovers tools from MemPalace Python TOOLS and includes synthetic system-tool fallbacks", () => {
 	const backend = read("src/local-backend.ts");
 	assert.match(backend, /from mempalace\.mcp_server import TOOLS/);
 	assert.match(backend, /spec.get\("input_schema"\)/);
 	assert.match(backend, /tool\["handler"\]\(\*\*params\)/);
 	assert.match(backend, /fallback_supported/);
+	assert.match(backend, /mempalace_hook_settings/);
+	assert.match(backend, /mempalace_memories_filed_away/);
+	assert.match(backend, /mempalace_reconnect/);
+	assert.match(backend, /mergeSyntheticTools/);
 });
 
 
-test("runtime opens an MCP circuit breaker and routes dynamic tools through fallback", () => {
+test("runtime opens an MCP circuit breaker for transport failures, keeps tool errors local, and routes dynamic tools through fallback", () => {
 	const runtime = read("src/runtime.ts");
+	const mcpClient = read("src/mcp-client.ts");
 	assert.match(runtime, /mcpCircuitOpen = false/);
 	assert.match(runtime, /tripMcpCircuit/);
-	assert.match(runtime, /this\.mcpCircuitOpen \|\| this\.disabledMcpTools\.has\(toolName\)/);
+	assert.match(runtime, /const kind = getMcpErrorKind\(error\)/);
+	assert.match(runtime, /if \(kind === "transport"\)/);
+	assert.match(runtime, /runSyntheticLocalFallbackTool/);
 	assert.match(runtime, /return this\.runFallbackTool\(tool\.name/);
 	assert.match(runtime, /registerDynamicTool/);
 	assert.match(runtime, /recordFallback\(/);
+	assert.match(mcpClient, /createTaggedMcpError/);
+	assert.match(mcpClient, /getMcpErrorKind/);
+	assert.match(mcpClient, /"transport"/);
+	assert.match(mcpClient, /"tool"/);
 });
 
 

@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { McpToolDefinition } from "./mcp-client";
@@ -11,6 +11,24 @@ export type LocalMemPalaceToolCall = {
 	parsed: unknown;
 	text: string;
 };
+
+const SYNTHETIC_LOCAL_TOOLS: McpToolDefinition[] = [
+	{
+		name: "mempalace_hook_settings",
+		description: "Inspect MemPalace auto-save hook settings.",
+		inputSchema: { type: "object", properties: {} },
+	},
+	{
+		name: "mempalace_memories_filed_away",
+		description: "Check whether a recent silent checkpoint likely ran.",
+		inputSchema: { type: "object", properties: {} },
+	},
+	{
+		name: "mempalace_reconnect",
+		description: "Refresh MemPalace client state after external writes.",
+		inputSchema: { type: "object", properties: {} },
+	},
+];
 
 const DISCOVER_LOCAL_TOOLS_SCRIPT = `
 import json
@@ -71,7 +89,7 @@ export async function discoverLocalMemPalaceTools(pi: ExtensionAPI, signal?: Abo
 		parsed && typeof parsed === "object" && Array.isArray((parsed as { tools?: unknown[] }).tools)
 			? (((parsed as { tools: unknown[] }).tools as unknown[]).filter(isToolDefinition) as McpToolDefinition[])
 			: [];
-	return { command, result, tools };
+	return { command, result, tools: mergeSyntheticTools(tools) };
 }
 
 export async function callLocalMemPalaceTool(
@@ -150,8 +168,23 @@ function formatStructuredToolText(parsed: unknown, result: ExecResult): string {
 	return stderr || `MemPalace local backend exited with code ${result.code}`;
 }
 
+function mergeSyntheticTools(tools: McpToolDefinition[]): McpToolDefinition[] {
+	const seen = new Set(tools.map((tool) => tool.name));
+	return [...tools, ...SYNTHETIC_LOCAL_TOOLS.filter((tool) => !seen.has(tool.name))];
+}
+
 function isToolDefinition(value: unknown): value is McpToolDefinition {
 	return Boolean(value) && typeof value === "object" && typeof (value as { name?: unknown }).name === "string";
+}
+
+export async function readRecentHookLog(maxChars = 4000): Promise<string | undefined> {
+	try {
+		const logPath = join(process.env.HOME || "", ".mempalace", "hook_state", "hook.log");
+		const text = await readFile(logPath, "utf8");
+		return text.slice(-maxChars).trim() || undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 export function hasStructuredToolFailure(parsed: unknown): boolean {

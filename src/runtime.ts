@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { getDefaultPiHookSettings, normalizeHookSettingsPayload } from "./hook-settings-policy.js";
 import { getMcpPromptGuidelines } from "./constants";
-import { callLocalMemPalaceTool, discoverLocalMemPalaceTools, hasStructuredToolFailure } from "./local-backend";
-import { MemPalaceMcpClient, type McpToolDefinition, mcpToolSchemaToTypeBox, normalizeMcpToolResult } from "./mcp-client";
+import { callLocalMemPalaceTool, discoverLocalMemPalaceTools, hasStructuredToolFailure, readRecentHookLog } from "./local-backend";
+import { MemPalaceMcpClient, type McpToolDefinition, getMcpErrorKind, mcpToolSchemaToTypeBox, normalizeMcpToolResult } from "./mcp-client";
 import type { AutoIngestOutcome } from "./utils";
 import { getMemPalaceSetupGuidance, getMemPalaceSetupGuidanceFromExec, runMemPalace, toolResult, unavailableToolResult } from "./utils";
 
@@ -108,7 +108,10 @@ export class MemPalaceRuntime {
 			return { client, tools };
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
-			await this.tripMcpCircuit(detail);
+			this.mcpStartupError = detail;
+			if (getMcpErrorKind(error) === "transport" || getMcpErrorKind(error) === undefined) {
+				await this.tripMcpCircuit(detail);
+			}
 			return { tools: [] };
 		}
 	}
@@ -193,8 +196,11 @@ export class MemPalaceRuntime {
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
 			this.lastMcpToolError = detail;
-			this.disabledMcpTools.add(toolName);
-			await this.tripMcpCircuit(detail);
+			const kind = getMcpErrorKind(error);
+			if (kind === "transport") {
+				this.disabledMcpTools.add(toolName);
+				await this.tripMcpCircuit(detail);
+			}
 			return undefined;
 		}
 	}
@@ -234,6 +240,8 @@ export class MemPalaceRuntime {
 	}
 
 	private async runLocalFallbackTool(toolName: string, args: Record<string, unknown>, signal?: AbortSignal, reason?: string) {
+		const synthetic = await this.runSyntheticLocalFallbackTool(toolName, reason);
+		if (synthetic) return synthetic;
 		await this.ensureLocalFallbackTools(signal);
 		const available = this.localFallbackTools.some((tool) => tool.name === toolName);
 		if (!available) {
@@ -271,6 +279,48 @@ export class MemPalaceRuntime {
 			},
 			isError,
 		};
+	}
+
+	private async runSyntheticLocalFallbackTool(toolName: string, reason?: string) {
+		if (toolName === "mempalace_hook_settings") {
+			const parsed = { settings: { ...getDefaultPiHookSettings() }, fallback: true, message: "Using Pi default hook settings because MemPalace did not expose operator hook settings outside MCP." };
+			this.recordFallback(toolName, "python", true, reason, parsed.message);
+			return {
+				content: [{ type: "text" as const, text: JSON.stringify(parsed, null, 2) }],
+				details: { transport: "python", fallback: true, fallbackReason: reason, toolName, parsed },
+				isError: false,
+			};
+		}
+		if (toolName === "mempalace_memories_filed_away") {
+			const hookLog = await readRecentHookLog();
+			const timestampMatch = Array.from(hookLog?.matchAll(/\[(\d{2}:\d{2}:\d{2})\]\s+TRIGGERING SAVE/g) || []).at(-1);
+			const parsed = {
+				status: "unknown",
+				message: "Local fallback cannot verify whether memories were filed away; upstream MemPalace only exposes that acknowledgement over MCP.",
+				timestamp: timestampMatch?.[1] || null,
+				hook_log_available: Boolean(hookLog),
+			};
+			this.recordFallback(toolName, "python", true, reason, parsed.message);
+			return {
+				content: [{ type: "text" as const, text: JSON.stringify(parsed, null, 2) }],
+				details: { transport: "python", fallback: true, fallbackReason: reason, toolName, parsed },
+				isError: false,
+			};
+		}
+		if (toolName === "mempalace_reconnect") {
+			const parsed = {
+				success: false,
+				error: "Local fallback active; no MCP reconnect is available or required.",
+				fallback: true,
+			};
+			this.recordFallback(toolName, "python", true, reason, parsed.error);
+			return {
+				content: [{ type: "text" as const, text: JSON.stringify(parsed, null, 2) }],
+				details: { transport: "python", fallback: true, fallbackReason: reason, toolName, parsed },
+				isError: false,
+			};
+		}
+		return undefined;
 	}
 
 	private async tripMcpCircuit(reason: string) {

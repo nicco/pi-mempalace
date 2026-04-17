@@ -31,6 +31,10 @@ type JsonRpcResponse = {
 	error?: { code?: number; message?: string };
 };
 
+type McpErrorKind = "transport" | "tool" | "abort";
+
+type TaggedMcpError = Error & { mcpKind?: McpErrorKind };
+
 const DEFAULT_MCP_CONNECT_TIMEOUT_MS = normalizeTimeout(process.env.MEMPALACE_MCP_CONNECT_TIMEOUT_MS, 8000);
 const DEFAULT_MCP_REQUEST_TIMEOUT_MS = normalizeTimeout(process.env.MEMPALACE_MCP_REQUEST_TIMEOUT_MS, 8000);
 
@@ -92,7 +96,7 @@ export class MemPalaceMcpClient {
 
 	async close(): Promise<void> {
 		for (const [, pending] of this.pending) {
-			pending.reject(new Error("MemPalace MCP client closed."));
+			pending.reject(createTaggedMcpError("MemPalace MCP client closed.", "transport"));
 		}
 		this.pending.clear();
 
@@ -193,7 +197,7 @@ export class MemPalaceMcpClient {
 	private createStartupError(command: string, message: string): Error {
 		const stderr = this.stderrBuffer.trim();
 		const detail = stderr ? `${message}\n${stderr}` : message;
-		return new Error(`Failed to start MemPalace MCP with ${command}: ${detail}`);
+		return createTaggedMcpError(`Failed to start MemPalace MCP with ${command}: ${detail}`, "transport");
 	}
 
 	private summarizeConnectErrors(errors: Error[], attemptedCommands: string[]): Error {
@@ -201,34 +205,34 @@ export class MemPalaceMcpClient {
 		const tried = attemptedCommands.join(", ");
 
 		if (errors.length > 0 && errors.every((error) => /ENOENT/i.test(error.message))) {
-			return new Error(`Python was not found (tried: ${tried}). Install Python 3 to enable MemPalace.`);
+			return createTaggedMcpError(`Python was not found (tried: ${tried}). Install Python 3 to enable MemPalace.`, "transport");
 		}
 
 		if (/No module named mempalace/i.test(messages)) {
-			return new Error(`Python was found, but the mempalace package is not installed in the environment used by ${tried}.`);
+			return createTaggedMcpError(`Python was found, but the mempalace package is not installed in the environment used by ${tried}.`, "transport");
 		}
 
-		return new Error(errors[errors.length - 1]?.message || "Failed to start MemPalace MCP server.");
+		return createTaggedMcpError(errors[errors.length - 1]?.message || "Failed to start MemPalace MCP server.", "transport");
 	}
 
 	private async notify(method: string, params: Record<string, unknown>): Promise<void> {
-		if (!this.child) throw new Error("MemPalace MCP server is not running.");
+		if (!this.child) throw createTaggedMcpError("MemPalace MCP server is not running.", "transport");
 		this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
 	}
 
 	private request(method: string, params: Record<string, unknown>, signal?: AbortSignal, timeoutMs = DEFAULT_MCP_REQUEST_TIMEOUT_MS): Promise<unknown> {
-		if (!this.child) throw new Error("MemPalace MCP server is not running.");
+		if (!this.child) throw createTaggedMcpError("MemPalace MCP server is not running.", "transport");
 		const id = this.nextId++;
 
 		return new Promise((resolve, reject) => {
 			const timeout = setTimeout(() => {
 				this.pending.delete(id);
-				reject(new Error(`MemPalace MCP request timed out after ${timeoutMs}ms: ${method}`));
+				reject(createTaggedMcpError(`MemPalace MCP request timed out after ${timeoutMs}ms: ${method}`, "transport"));
 			}, timeoutMs);
 			const abort = () => {
 				clearTimeout(timeout);
 				this.pending.delete(id);
-				reject(new Error(`MemPalace MCP request aborted: ${method}`));
+				reject(createTaggedMcpError(`MemPalace MCP request aborted: ${method}`, "abort"));
 			};
 			if (signal?.aborted) return abort();
 			signal?.addEventListener("abort", abort, { once: true });
@@ -264,11 +268,21 @@ export class MemPalaceMcpClient {
 		if (!pending) return;
 		this.pending.delete(message.id);
 		if (message.error) {
-			pending.reject(new Error(message.error.message || "Unknown MCP error"));
+			pending.reject(createTaggedMcpError(message.error.message || "Unknown MCP error", "tool"));
 			return;
 		}
 		pending.resolve(message.result);
 	}
+}
+
+function createTaggedMcpError(message: string, kind: McpErrorKind): Error {
+	const error = new Error(message) as TaggedMcpError;
+	error.mcpKind = kind;
+	return error;
+}
+
+export function getMcpErrorKind(error: unknown): McpErrorKind | undefined {
+	return error instanceof Error ? (error as TaggedMcpError).mcpKind : undefined;
 }
 
 function normalizeTimeout(value: string | undefined, fallback: number): number {

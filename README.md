@@ -22,6 +22,7 @@ A pi package that brings core MemPalace workflows to pi.
   - enforces bounded MCP startup and request timeouts so stalled MCP calls fail fast instead of hanging the agent indefinitely
   - dynamically exposes the MemPalace MCP tool surface to the agent, including write and system tools when the installed server provides them
   - discovers the same MemPalace tool surface directly from the local Python package so dynamic tools remain available even when the MCP transport is unavailable
+  - synthesizes local fallback responses for MemPalace operator/system tools when the installed package does not expose those controls outside MCP
   - uses MCP for `mempalace_status` and `mempalace_search` when possible, with CLI fallback; other dynamically surfaced MemPalace tools fall back to the local Python backend when MCP fails
   - fails gracefully when Python or the `mempalace` Python package is missing, without crashing pi
   - shows an in-app setup notice when MemPalace cannot start because dependencies are missing
