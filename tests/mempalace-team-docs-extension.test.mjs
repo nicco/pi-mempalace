@@ -145,6 +145,108 @@ test("memory-docs status command reports enabled state, config, repo root, and d
 	`);
 });
 
+test("import-existing command mirrors existing repo memories from MemPalace search", () => {
+	runExtensionScenario(String.raw`
+		import assert from "node:assert/strict";
+		import fs from "node:fs/promises";
+		import os from "node:os";
+		import path from "node:path";
+		const extension = (await import(process.env.MEMDOCS_EXTENSION_PATH)).default;
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "mp-team-docs-import-"));
+		try {
+			await fs.mkdir(path.join(root, ".git"));
+			const commands = new Map();
+			const execCalls = [];
+			extension({
+				on() {},
+				registerCommand(name, command) { commands.set(name, command); },
+				async exec(command, args) {
+					execCalls.push([command, args]);
+					if (args[0] === "status") return { code: 0, stdout: "WING: mempalace_pi\n  ROOM: decisions 2 drawers\n", stderr: "" };
+					if (args[0] === "search") return { code: 0, stdout: [
+						"============================================================",
+						"  Results for: \"\"",
+						"  Wing: mempalace_pi",
+						"============================================================",
+						"",
+						"  [1] mempalace_pi / decisions",
+						"      Source: session:2026-04-16",
+						"      Match:  -0.1",
+						"",
+						"      Decision: use deterministic team docs import.",
+						"      Follow-up: document the import command.",
+						"",
+						"  ────────────────────────────────────────────────────────",
+						"  [2] mempalace_pi / personal",
+						"      Source: session:2026-04-16",
+						"      Match:  -0.2",
+						"",
+						"      Personal diary: private reflection.",
+					].join("\n"), stderr: "" };
+					throw new Error("unexpected exec " + command + " " + args.join(" "));
+				}
+			});
+			const notices = [];
+			await commands.get("memory-docs").handler("import-existing --wing mempalace_pi --limit 10", {
+				cwd: root,
+				hasUI: true,
+				ui: { notify(message, level) { notices.push({ message, level }); } }
+			});
+			assert.equal(execCalls.length, 2);
+			assert.match(notices[0].message, /MemPalace existing-memory import/);
+			assert.match(notices[0].message, /created: 1/);
+			assert.match(notices[0].message, /skipped: 1/);
+			const files = await fs.readdir(path.join(root, "docs", "decisions"));
+			assert.equal(files.length, 1);
+			const markdown = await fs.readFile(path.join(root, "docs", "decisions", files[0]), "utf8");
+			assert.match(markdown, /Decision: use deterministic team docs import/);
+			assert.match(markdown, /- \[ \] document the import command\./);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	`);
+});
+
+test("import-existing dry-run reports targets without writing docs", () => {
+	runExtensionScenario(String.raw`
+		import assert from "node:assert/strict";
+		import fs from "node:fs/promises";
+		import os from "node:os";
+		import path from "node:path";
+		const extension = (await import(process.env.MEMDOCS_EXTENSION_PATH)).default;
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "mp-team-docs-import-dry-"));
+		try {
+			await fs.mkdir(path.join(root, ".git"));
+			const commands = new Map();
+			extension({
+				on() {},
+				registerCommand(name, command) { commands.set(name, command); },
+				async exec(_command, args) {
+					if (args[0] === "status") return { code: 0, stdout: "WING: mempalace_pi\n  ROOM: architecture 1 drawers\n", stderr: "" };
+					return { code: 0, stdout: [
+						"  [1] mempalace_pi / architecture",
+						"      Source: session",
+						"      Match: -0.1",
+						"",
+						"      Architecture: import-existing uses MemPalace search output as its source.",
+					].join("\n"), stderr: "" };
+				}
+			});
+			const notices = [];
+			await commands.get("memory-docs").handler("import-existing --dry-run --wing mempalace_pi", {
+				cwd: root,
+				hasUI: true,
+				ui: { notify(message) { notices.push(message); } }
+			});
+			assert.match(notices[0], /dry run/);
+			assert.match(notices[0], /targets:/);
+			await assert.rejects(fs.stat(path.join(root, "docs")), /ENOENT/);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	`);
+});
+
 test("tool_result hook appends created, skipped, and secret notes", () => {
 	runExtensionScenario(String.raw`
 		import assert from "node:assert/strict";

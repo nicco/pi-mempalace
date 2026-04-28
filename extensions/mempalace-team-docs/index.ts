@@ -67,7 +67,7 @@ type WritePlan = {
 };
 
 type ProcessResult =
-	| { status: "created" | "appended"; relativePath: string }
+	| { status: "created" | "appended" | "unchanged"; relativePath: string }
 	| { status: "skipped"; reason: string; isSecret?: boolean };
 
 const POLICY_PROMPT = `
@@ -358,7 +358,7 @@ function extractFollowUps(text: string): string[] {
 			const explicit = line.match(/\b(?:todo|follow-?up|next step|action item):\s*(.+)$/i);
 			return explicit?.[1]?.trim() || line;
 		})
-		.filter((line) => /\b(todo|follow-?up|next step|action item|needs?|should|add|fix|update|create|write|verify)\b/i.test(line))
+		.filter((line) => /\b(todo|follow-?up|next step|action item|needs?|should|add|fix|update|create|write|verify|document)\b/i.test(line))
 		.slice(0, 5);
 }
 
@@ -415,12 +415,14 @@ function makeWritePlan(repoRoot: string, config: Config, memory: MemoryInput, ca
 	};
 }
 
-async function writeTeamDoc(plan: WritePlan, memory: MemoryInput, category: Category, sanitizedContent: string): Promise<"created" | "appended"> {
+async function writeTeamDoc(plan: WritePlan, memory: MemoryInput, category: Category, sanitizedContent: string): Promise<"created" | "appended" | "unchanged"> {
 	await mkdir(path.dirname(plan.absolutePath), { recursive: true });
 	try {
 		await access(plan.absolutePath);
-		const appendSection = buildAppendSection(memory, category, sanitizedContent);
 		const current = await readFile(plan.absolutePath, "utf8");
+		const duplicateNeedle = sanitizedContent.trim().slice(0, 500);
+		if (duplicateNeedle && current.includes(duplicateNeedle)) return "unchanged";
+		const appendSection = buildAppendSection(memory, category, sanitizedContent);
 		await writeFile(plan.absolutePath, `${current.replace(/\s*$/u, "\n")}${appendSection}`, "utf8");
 		return "appended";
 	} catch (error) {
@@ -430,9 +432,8 @@ async function writeTeamDoc(plan: WritePlan, memory: MemoryInput, category: Cate
 	}
 }
 
-async function processMemoryWrite(toolName: string, input: unknown, cwd: string): Promise<ProcessResult> {
-	const memory = memoryInputFromTool(toolName, input);
-	if (!memory) return { status: "skipped", reason: "no memory content found" };
+async function processMemory(memory: MemoryInput, cwd: string): Promise<ProcessResult> {
+	if (!memory.content.trim()) return { status: "skipped", reason: "no memory content found" };
 
 	const { config, repo } = await loadConfig(cwd);
 	if (!config.enabled) return { status: "skipped", reason: "extension disabled" };
@@ -454,6 +455,12 @@ async function processMemoryWrite(toolName: string, input: unknown, cwd: string)
 	const plan = makeWritePlan(repo.repoRoot, config, sanitizedMemory, classification.category, redaction.text);
 	const status = await writeTeamDoc(plan, sanitizedMemory, classification.category, redaction.text);
 	return { status, relativePath: plan.relativePath };
+}
+
+async function processMemoryWrite(toolName: string, input: unknown, cwd: string): Promise<ProcessResult> {
+	const memory = memoryInputFromTool(toolName, input);
+	if (!memory) return { status: "skipped", reason: "no memory content found" };
+	return processMemory(memory, cwd);
 }
 
 function appendToolResultNote(content: unknown, note: string): Array<{ type: "text"; text: string }> {
@@ -505,6 +512,189 @@ async function dryRunText(cwd: string, text: string): Promise<string> {
 	].join("\n");
 }
 
+type ImportExistingOptions = {
+	dryRun: boolean;
+	wing?: string;
+	limit: number;
+};
+
+type StatusWing = {
+	wing: string;
+	drawers: number;
+};
+
+function parseImportExistingArgs(args: string): ImportExistingOptions {
+	const parts = args.trim().split(/\s+/).filter(Boolean);
+	const options: ImportExistingOptions = { dryRun: false, limit: 10_000 };
+	for (let index = 0; index < parts.length; index += 1) {
+		const part = parts[index];
+		if (part === "--dry-run" || part === "dry-run") {
+			options.dryRun = true;
+			continue;
+		}
+		if (part === "--wing") {
+			options.wing = parts[index + 1];
+			index += 1;
+			continue;
+		}
+		if (part?.startsWith("--wing=")) {
+			options.wing = part.slice("--wing=".length);
+			continue;
+		}
+		if (part === "--limit") {
+			const parsed = Number.parseInt(parts[index + 1] ?? "", 10);
+			if (Number.isFinite(parsed) && parsed > 0) options.limit = parsed;
+			index += 1;
+			continue;
+		}
+		if (part?.startsWith("--limit=")) {
+			const parsed = Number.parseInt(part.slice("--limit=".length), 10);
+			if (Number.isFinite(parsed) && parsed > 0) options.limit = parsed;
+		}
+	}
+	return options;
+}
+
+function parseStatusWings(output: string): StatusWing[] {
+	const wings: StatusWing[] = [];
+	let current: StatusWing | undefined;
+	for (const line of output.split(/\r?\n/)) {
+		const wingMatch = line.match(/^\s*WING:\s*(.+?)\s*$/);
+		if (wingMatch) {
+			current = { wing: wingMatch[1].trim(), drawers: 0 };
+			wings.push(current);
+			continue;
+		}
+		const roomMatch = line.match(/^\s*ROOM:\s+.+?\s+(\d+)\s+drawers?\s*$/);
+		if (current && roomMatch) current.drawers += Number.parseInt(roomMatch[1], 10) || 0;
+	}
+	return wings;
+}
+
+async function repoWingCandidates(repoRoot: string): Promise<string[]> {
+	const base = path.basename(repoRoot);
+	const candidates = new Set([base, base.replace(/-/g, "_"), base.replace(/_/g, "-")]);
+	try {
+		const pkg = JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8")) as { name?: unknown };
+		if (typeof pkg.name === "string" && pkg.name.trim()) {
+			candidates.add(pkg.name.trim());
+			candidates.add(pkg.name.trim().replace(/-/g, "_"));
+			candidates.add(pkg.name.trim().replace(/_/g, "-"));
+		}
+	} catch {
+		// package.json is optional.
+	}
+	return [...candidates];
+}
+
+function parseMemPalaceSearchResults(output: string): MemoryInput[] {
+	const memories: MemoryInput[] = [];
+	let current: { wing: string; room: string; lines: string[] } | undefined;
+	const flush = () => {
+		if (!current) return;
+		const content = current.lines
+			.join("\n")
+			.replace(/\n{3,}/g, "\n\n")
+			.trim();
+		if (content) memories.push({ kind: "drawer", wing: current.wing, room: current.room, content });
+	};
+
+	for (const line of output.split(/\r?\n/)) {
+		const header = line.match(/^\s*\[\d+\]\s+(.+?)\s+\/\s+(.+?)\s*$/);
+		if (header) {
+			flush();
+			current = { wing: header[1].trim(), room: header[2].trim(), lines: [] };
+			continue;
+		}
+		if (!current) continue;
+		if (/^\s*[─-]{8,}\s*$/.test(line)) continue;
+		if (/^\s*(Source|Match):\s/.test(line)) continue;
+		current.lines.push(line.replace(/^\s{6}/, ""));
+	}
+	flush();
+
+	const seen = new Set<string>();
+	return memories.filter((memory) => {
+		const key = `${memory.wing}\u0000${memory.room}\u0000${memory.content}`;
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
+}
+
+function summarizeImportResults(results: ProcessResult[], dryRun: boolean, wings: string[]): string {
+	const count = (status: ProcessResult["status"]) => results.filter((result) => result.status === status).length;
+	const targets = [...new Set(results.flatMap((result) => ("relativePath" in result ? [result.relativePath] : [])))].slice(0, 12);
+	return [
+		`MemPalace existing-memory ${dryRun ? "dry run" : "import"}`,
+		`wings: ${wings.join(", ") || "none"}`,
+		`examined: ${results.length}`,
+		`created: ${dryRun ? 0 : count("created")}`,
+		`updated: ${dryRun ? 0 : count("appended")}`,
+		`unchanged: ${count("unchanged")}`,
+		`skipped: ${count("skipped")}`,
+		targets.length ? `targets:\n${targets.map((target) => `- ${target}`).join("\n")}` : undefined,
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
+async function importExistingMemories(
+	pi: ExtensionAPI,
+	cwd: string,
+	options: ImportExistingOptions,
+	signal?: AbortSignal,
+): Promise<string> {
+	const { config, repo } = await loadConfig(cwd);
+	if (!config.enabled) return "MemPalace existing-memory import skipped: extension disabled.";
+	if (config.requireGitRepo && !repo.isGitRepo) return "MemPalace existing-memory import skipped: no git repository found.";
+
+	const statusRun = await pi.exec("mempalace", ["status"], { signal, timeout: 60_000 });
+	if (statusRun.code !== 0) {
+		return `MemPalace existing-memory import failed: mempalace status exited ${statusRun.code}\n${statusRun.stderr || statusRun.stdout}`.trim();
+	}
+
+	const statusWings = parseStatusWings(statusRun.stdout);
+	const candidates = options.wing ? [options.wing] : await repoWingCandidates(repo.repoRoot);
+	const matchingWings = statusWings.filter((entry) => candidates.includes(entry.wing));
+	const wings = options.wing ? [{ wing: options.wing, drawers: options.limit }] : matchingWings;
+	if (wings.length === 0) {
+		return `MemPalace existing-memory import skipped: no status wings matched this repo (${candidates.join(", ")}). Use --wing <name> to override.`;
+	}
+
+	const memories: MemoryInput[] = [];
+	for (const wing of wings) {
+		const resultCount = Math.max(1, Math.min(options.limit, wing.drawers || options.limit));
+		const searchRun = await pi.exec("mempalace", ["search", "", "--wing", wing.wing, "--results", String(resultCount)], {
+			signal,
+			timeout: 120_000,
+		});
+		if (searchRun.code === 0) memories.push(...parseMemPalaceSearchResults(searchRun.stdout));
+	}
+
+	const results: ProcessResult[] = [];
+	for (const memory of memories.slice(0, options.limit)) {
+		if (options.dryRun) {
+			const classification = classifyMemory(memory, config);
+			if (!classification.shareable) {
+				results.push({ status: "skipped", reason: classification.reason });
+				continue;
+			}
+			const redaction = redactSensitiveText(memory.content, config);
+			if (redaction.highRisk) {
+				results.push({ status: "skipped", reason: `high-risk secret pattern detected (${redaction.reasons.join(", ")}); not written`, isSecret: true });
+				continue;
+			}
+			const plan = makeWritePlan(repo.repoRoot, config, memory, classification.category, redaction.text);
+			results.push({ status: "unchanged", relativePath: plan.relativePath });
+			continue;
+		}
+		results.push(await processMemory(memory, cwd));
+	}
+
+	return summarizeImportResults(results, options.dryRun, wings.map((wing) => wing.wing));
+}
+
 function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info") {
 	if (ctx.hasUI) ctx.ui.notify(message, level);
 }
@@ -524,8 +714,8 @@ export default function mempalaceTeamDocs(pi: ExtensionAPI) {
 
 		try {
 			const result = await processMemoryWrite(event.toolName, event.input, ctx.cwd);
-			if (result.status === "created" || result.status === "appended") {
-				const action = result.status === "created" ? "created" : "updated";
+			if (result.status === "created" || result.status === "appended" || result.status === "unchanged") {
+				const action = result.status === "created" ? "created" : result.status === "appended" ? "updated" : "unchanged";
 				const note = `Team doc ${action}: ${result.relativePath}`;
 				notify(ctx, note, "info");
 				return { content: appendToolResultNote(event.content, note) };
@@ -547,9 +737,9 @@ export default function mempalaceTeamDocs(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("memory-docs", {
-		description: "Manage MemPalace team docs mirroring (status|enable|disable|dry-run <text>)",
+		description: "Manage MemPalace team docs mirroring (status|enable|disable|dry-run <text>|import-existing [--dry-run] [--wing <wing>] [--limit N])",
 		getArgumentCompletions: (prefix) => {
-			const options = ["status", "enable", "disable", "dry-run"];
+			const options = ["status", "enable", "disable", "dry-run", "import-existing"];
 			return options.filter((option) => option.startsWith(prefix)).map((value) => ({ value, label: value }));
 		},
 		handler: async (args, ctx) => {
@@ -574,7 +764,12 @@ export default function mempalaceTeamDocs(pi: ExtensionAPI) {
 				commandOutput(ctx, await dryRunText(ctx.cwd, text), "info");
 				return;
 			}
-			commandOutput(ctx, "Usage: /memory-docs status|enable|disable|dry-run <text>", "warning");
+			if (command === "import-existing") {
+				const output = await importExistingMemories(pi, ctx.cwd, parseImportExistingArgs(rest.join(" ")), ctx.signal);
+				commandOutput(ctx, output, "info");
+				return;
+			}
+			commandOutput(ctx, "Usage: /memory-docs status|enable|disable|dry-run <text>|import-existing [--dry-run] [--wing <wing>] [--limit N]", "warning");
 		},
 	});
 }
@@ -586,8 +781,14 @@ export const __mempalaceTeamDocsTest = {
 	findRepoRoot,
 	loadConfig,
 	makeWritePlan,
+	importExistingMemories,
 	memoryInputFromTool,
+	parseImportExistingArgs,
+	parseMemPalaceSearchResults,
+	parseStatusWings,
+	processMemory,
 	processMemoryWrite,
 	redactSensitiveText,
+	repoWingCandidates,
 	statusText,
 };
