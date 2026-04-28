@@ -626,7 +626,7 @@ function summarizeImportResults(results: ProcessResult[], dryRun: boolean, wings
 	const count = (status: ProcessResult["status"]) => results.filter((result) => result.status === status).length;
 	const targets = [...new Set(results.flatMap((result) => ("relativePath" in result ? [result.relativePath] : [])))].slice(0, 12);
 	return [
-		`MemPalace existing-memory ${dryRun ? "dry run" : "import"}`,
+		`✅ MemPalace existing-memory ${dryRun ? "dry run" : "import"} complete`,
 		`wings: ${wings.join(", ") || "none"}`,
 		`examined: ${results.length}`,
 		`created: ${dryRun ? 0 : count("created")}`,
@@ -699,9 +699,23 @@ function notify(ctx: ExtensionContext, message: string, level: "info" | "warning
 	if (ctx.hasUI) ctx.ui.notify(message, level);
 }
 
-function commandOutput(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info") {
+function commandOutput(pi: ExtensionAPI, ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info") {
 	if (ctx.hasUI) ctx.ui.notify(message, level);
 	else console.log(message);
+
+	try {
+		(pi as ExtensionAPI & { sendMessage?: (message: unknown, options?: unknown) => void }).sendMessage?.(
+			{
+				customType: "memory-docs",
+				content: message,
+				display: true,
+				details: { level, source: EXTENSION_NAME },
+			},
+			{ deliverAs: "nextTurn" },
+		);
+	} catch {
+		// Notifications/console output above are sufficient if session message injection is unavailable.
+	}
 }
 
 export default function mempalaceTeamDocs(pi: ExtensionAPI) {
@@ -746,30 +760,30 @@ export default function mempalaceTeamDocs(pi: ExtensionAPI) {
 			const trimmed = args.trim();
 			const [command, ...rest] = trimmed.split(/\s+/);
 			if (!command || command === "status") {
-				commandOutput(ctx, await statusText(ctx.cwd), "info");
+				commandOutput(pi, ctx, await statusText(ctx.cwd), "info");
 				return;
 			}
 			if (command === "enable" || command === "disable") {
 				const enabled = command === "enable";
 				const configPath = await writeProjectEnabledConfig(ctx.cwd, enabled);
-				commandOutput(ctx, `${EXTENSION_NAME} ${enabled ? "enabled" : "disabled"} in ${configPath}`, "info");
+				commandOutput(pi, ctx, `${EXTENSION_NAME} ${enabled ? "enabled" : "disabled"} in ${configPath}`, "info");
 				return;
 			}
 			if (command === "dry-run") {
 				const text = rest.join(" ").trim();
 				if (!text) {
-					commandOutput(ctx, "Usage: /memory-docs dry-run <text>", "warning");
+					commandOutput(pi, ctx, "Usage: /memory-docs dry-run <text>", "warning");
 					return;
 				}
-				commandOutput(ctx, await dryRunText(ctx.cwd, text), "info");
+				commandOutput(pi, ctx, await dryRunText(ctx.cwd, text), "info");
 				return;
 			}
 			if (command === "import-existing") {
 				const output = await importExistingMemories(pi, ctx.cwd, parseImportExistingArgs(rest.join(" ")), ctx.signal);
-				commandOutput(ctx, output, "info");
+				commandOutput(pi, ctx, output, "info");
 				return;
 			}
-			commandOutput(ctx, "Usage: /memory-docs status|enable|disable|dry-run <text>|import-existing [--dry-run] [--wing <wing>] [--limit N]", "warning");
+			commandOutput(pi, ctx, "Usage: /memory-docs status|enable|disable|dry-run <text>|import-existing [--dry-run] [--wing <wing>] [--limit N]", "warning");
 		},
 	});
 }
