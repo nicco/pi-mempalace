@@ -22,7 +22,8 @@ export function registerRenderers(pi: ExtensionAPI) {
 		const formatted = shown
 			.map((line) => {
 				if (line.includes(": ok")) return `${theme.fg("success", "✓")} ${theme.fg("muted", line.replace(/: ok$/, ""))}`;
-				if (line.includes(": unavailable") || line.includes(": failed") || line.includes("missing ")) {
+				const reportsMissingItems = line.includes("missing ") && !line.endsWith(": none");
+				if (line.includes(": unavailable") || line.includes(": failed") || reportsMissingItems) {
 					return `${theme.fg("warning", "!")} ${theme.fg("muted", line)}`;
 				}
 				if (line.includes(":\n")) {
