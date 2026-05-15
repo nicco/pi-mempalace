@@ -32,7 +32,19 @@ const SYNTHETIC_LOCAL_TOOLS: McpToolDefinition[] = [
 
 const DISCOVER_LOCAL_TOOLS_SCRIPT = `
 import json
-from mempalace.mcp_server import TOOLS
+import os
+import sys
+import mempalace.mcp_server as mcp_server
+
+if hasattr(mcp_server, "_restore_stdout"):
+    mcp_server._restore_stdout()
+else:
+    real_fd = getattr(mcp_server, "_REAL_STDOUT_FD", None)
+    if real_fd is not None:
+        os.dup2(real_fd, 1)
+    sys.stdout = getattr(mcp_server, "_REAL_STDOUT", sys.__stdout__)
+
+TOOLS = mcp_server.TOOLS
 print(json.dumps({
     "tools": [
         {
@@ -47,8 +59,19 @@ print(json.dumps({
 
 const CALL_LOCAL_TOOL_SCRIPT = `
 import json
+import os
 import sys
-from mempalace.mcp_server import TOOLS
+import mempalace.mcp_server as mcp_server
+
+if hasattr(mcp_server, "_restore_stdout"):
+    mcp_server._restore_stdout()
+else:
+    real_fd = getattr(mcp_server, "_REAL_STDOUT_FD", None)
+    if real_fd is not None:
+        os.dup2(real_fd, 1)
+    sys.stdout = getattr(mcp_server, "_REAL_STDOUT", sys.__stdout__)
+
+TOOLS = mcp_server.TOOLS
 
 tool_name = sys.argv[1]
 payload_path = sys.argv[2]

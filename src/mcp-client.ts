@@ -45,6 +45,7 @@ export class MemPalaceMcpClient {
 	private readonly discoveredTools = new Map<string, McpToolDefinition>();
 	private stderrBuffer = "";
 	private commandLine = "";
+	private stdoutReader?: readline.Interface;
 
 	get isConnected(): boolean {
 		return !!this.child && !this.child.killed;
@@ -100,6 +101,9 @@ export class MemPalaceMcpClient {
 		}
 		this.pending.clear();
 
+		this.stdoutReader?.close();
+		this.stdoutReader = undefined;
+
 		if (this.child && !this.child.killed) {
 			this.child.kill();
 		}
@@ -114,7 +118,9 @@ export class MemPalaceMcpClient {
 		const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
 		this.child = child;
 
+		this.stdoutReader?.close();
 		const rl = readline.createInterface({ input: child.stdout });
+		this.stdoutReader = rl;
 		rl.on("line", (line) => this.handleLine(line));
 		child.stderr.on("data", (chunk) => {
 			this.stderrBuffer += chunk.toString();
@@ -138,7 +144,8 @@ export class MemPalaceMcpClient {
 				for (const [, pending] of this.pending) pending.reject(reason);
 				this.pending.clear();
 				this.child = undefined;
-				rl.close();
+				this.stdoutReader?.close();
+				this.stdoutReader = undefined;
 			});
 		});
 
@@ -188,9 +195,6 @@ export class MemPalaceMcpClient {
 			clearStartupTimer();
 			signal?.removeEventListener("abort", abortStartup);
 			signal?.removeEventListener("abort", clearStartupTimer);
-			if (startupComplete) {
-				rl.close();
-			}
 		}
 	}
 

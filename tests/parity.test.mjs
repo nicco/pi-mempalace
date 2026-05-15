@@ -126,7 +126,9 @@ test("MCP client enforces internal connect and request timeouts", () => {
 
 test("local backend discovers tools from MemPalace Python TOOLS and includes synthetic system-tool fallbacks", () => {
 	const backend = read("src/local-backend.ts");
-	assert.match(backend, /from mempalace\.mcp_server import TOOLS/);
+	assert.match(backend, /import mempalace\.mcp_server as mcp_server/);
+	assert.match(backend, /_restore_stdout/);
+	assert.match(backend, /TOOLS = mcp_server\.TOOLS/);
 	assert.match(backend, /spec.get\("input_schema"\)/);
 	assert.match(backend, /tool\["handler"\]\(\*\*params\)/);
 	assert.match(backend, /fallback_supported/);
@@ -134,6 +136,14 @@ test("local backend discovers tools from MemPalace Python TOOLS and includes syn
 	assert.match(backend, /mempalace_memories_filed_away/);
 	assert.match(backend, /mempalace_reconnect/);
 	assert.match(backend, /mergeSyntheticTools/);
+});
+
+
+test("MCP client keeps stdout reader open after startup for later tool calls", () => {
+	const mcpClient = read("src/mcp-client.ts");
+	assert.match(mcpClient, /private stdoutReader\?: readline\.Interface/);
+	assert.match(mcpClient, /this\.stdoutReader = rl/);
+	assert.doesNotMatch(mcpClient, /if \(startupComplete\) \{\s*rl\.close\(\);\s*\}/);
 });
 
 
@@ -158,12 +168,15 @@ test("runtime opens an MCP circuit breaker for transport failures, keeps tool er
 test("doctor and session start report fallback backend readiness and circuit state", () => {
 	const commands = read("src/commands.ts");
 	const hooks = read("src/hooks.ts");
+	const renderers = read("src/renderers.ts");
 	assert.match(commands, /mcp circuit:/);
 	assert.match(commands, /local fallback discovery:/);
 	assert.match(commands, /fallback-registered dynamic tools:/);
 	assert.match(commands, /last fallback:/);
 	assert.match(hooks, /ensureLocalFallbackTools/);
 	assert.match(hooks, /MemPalace local fallback ready/);
+	assert.match(renderers, /reportsMissingItems/);
+	assert.match(renderers, /!line\.endsWith\(": none"\)/);
 });
 
 
