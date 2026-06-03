@@ -326,6 +326,287 @@ export class StdioTransport implements McpTransport {
   }
 }
 
+// ---------------------------------------------------------------------------
+// HttpTransport — MCP Streamable HTTP transport
+// ---------------------------------------------------------------------------
+
+export class HttpTransport implements McpTransport {
+  private sessionId?: string;
+  private nextId = 1;
+  private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  private readonly discoveredTools = new Map<string, McpToolDefinition>();
+  private url = "";
+  private timeoutMs: number;
+
+  constructor(baseUrl: string, timeoutMs = DEFAULT_MCP_REQUEST_TIMEOUT_MS) {
+    this.url = baseUrl;
+    this.timeoutMs = timeoutMs;
+  }
+
+  get isConnected(): boolean {
+    return !!this.sessionId;
+  }
+
+  getCommandLine(): string {
+    return this.url;
+  }
+
+  getStderr(): string {
+    return "";
+  }
+
+  getTools(): McpToolDefinition[] {
+    return [...this.discoveredTools.values()];
+  }
+
+  getType(): "http" {
+    return "http";
+  }
+
+  async connect(signal?: AbortSignal): Promise<void> {
+    // Step 1: initialize
+    const initResult = await this.post(
+      "initialize",
+      {
+        protocolVersion: "2025-11-25",
+        capabilities: { tools: {} },
+        clientInfo: { name: "pi-mempalace", version: "0.2.2" },
+      },
+      signal,
+    );
+
+    if ((initResult as { error?: { message?: string } })?.error) {
+      throw createTaggedMcpError(
+        `MCP initialize failed: ${(initResult as { error: { message: string } }).error.message}`,
+        "transport",
+      );
+    }
+
+    // Step 2: capture session ID from response headers
+    this.sessionId = (initResult as { _sessionId?: string })._sessionId;
+    if (!this.sessionId) {
+      throw createTaggedMcpError("MCP initialize did not return a session ID", "transport");
+    }
+
+    // Step 3: notify initialized
+    await this.notify("notifications/initialized", {}, signal);
+
+    // Step 4: list tools
+    const list = (await this.request("tools/list", {}, signal)) as { tools?: McpToolDefinition[] };
+    this.discoveredTools.clear();
+    for (const tool of list.tools ?? []) {
+      this.discoveredTools.set(tool.name, tool);
+    }
+  }
+
+  async callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+    if (!this.isConnected) {
+      await this.connect(signal);
+    }
+    return this.request("tools/call", { name, arguments: args }, signal);
+  }
+
+  async listTools(signal?: AbortSignal): Promise<McpToolDefinition[]> {
+    if (!this.isConnected) {
+      await this.connect(signal);
+    }
+    const list = (await this.request("tools/list", {}, signal)) as { tools?: McpToolDefinition[] };
+    return list.tools ?? [];
+  }
+
+  async close(): Promise<void> {
+    for (const [, pending] of this.pending) {
+      pending.reject(createTaggedMcpError("HTTP MCP transport closed.", "transport"));
+    }
+    this.pending.clear();
+    this.sessionId = undefined;
+    this.discoveredTools.clear();
+  }
+
+  private async notify(
+    method: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!this.sessionId) throw createTaggedMcpError("HTTP MCP transport not connected.", "transport");
+    await this.post(method, params, signal, true);
+  }
+
+  private request(
+    method: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<unknown> {
+    if (!this.sessionId) throw createTaggedMcpError("HTTP MCP transport not connected.", "transport");
+    const id = this.nextId++;
+    const timeout = timeoutMs ?? this.timeoutMs;
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(createTaggedMcpError(`MCP request timed out after ${timeout}ms: ${method}`, "transport"));
+      }, timeout);
+
+      const abort = () => {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(createTaggedMcpError(`MCP request aborted: ${method}`, "abort"));
+      };
+
+      if (signal?.aborted) return abort();
+      signal?.addEventListener("abort", abort, { once: true });
+
+      this.pending.set(id, {
+        resolve: (value) => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", abort);
+          resolve(value);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", abort);
+          reject(error);
+        },
+      });
+
+      this.post(method, { ...params, _requestId: id }, signal)
+        .then((result) => {
+          this.pending.delete(id);
+          resolve(result);
+        })
+        .catch((error) => {
+          this.pending.delete(id);
+          reject(error);
+        });
+    });
+  }
+
+  private async post(
+    method: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+    isNotification = false,
+  ): Promise<unknown> {
+    if (!this.sessionId) throw createTaggedMcpError("HTTP MCP transport not connected.", "transport");
+
+    const requestId = (params as { _requestId?: number })._requestId;
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      ...(requestId !== undefined ? { id: requestId } : {}),
+      method,
+      params,
+    });
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "Mcp-Session-Id": this.sessionId,
+    };
+
+    const response = await fetch(this.url, {
+      method: "POST",
+      headers,
+      body,
+      signal,
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw createTaggedMcpError(
+        `MCP HTTP ${response.status}: ${text || response.statusText}`,
+        "transport",
+      );
+    }
+
+    // Capture session ID from response headers (may be set on first request)
+    const newSessionId = response.headers.get("Mcp-Session-Id");
+    if (newSessionId && newSessionId !== this.sessionId) {
+      this.sessionId = newSessionId;
+    }
+
+    // For notifications, there may be no body
+    if (isNotification) return undefined;
+
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/event-stream")) {
+      return await this.readSseResponse(response);
+    }
+
+    // Regular JSON response
+    const data = await response.json() as { id?: number; result?: unknown; error?: { message?: string } };
+
+    if (data.error) {
+      throw createTaggedMcpError(data.error.message || "Unknown MCP error", "tool");
+    }
+
+    // Attach session ID for connect() to pick up
+    if (this.sessionId) {
+      (data as { _sessionId?: string })._sessionId = this.sessionId;
+    }
+
+    return data.result;
+  }
+
+  private async readSseResponse(response: Response): Promise<unknown> {
+    const reader = response.body?.getReader();
+    if (!reader) throw createTaggedMcpError("No response body for SSE stream.", "transport");
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith(":")) continue;
+
+          if (trimmed.startsWith("event:")) continue;
+
+          if (trimmed.startsWith("data:")) {
+            const dataLine = trimmed.slice(5).trim();
+            if (!dataLine) continue;
+
+            let eventData: { id?: number; result?: unknown; error?: { message?: string } };
+            try {
+              eventData = JSON.parse(dataLine);
+            } catch {
+              continue;
+            }
+
+            if (eventData.error) {
+              throw createTaggedMcpError(eventData.error.message || "Unknown MCP error", "tool");
+            }
+
+            // Check if this is an endpoint event
+            if (
+              eventData.result &&
+              typeof eventData.result === "object" &&
+              "endpoint" in (eventData.result as object)
+            ) {
+              this.url = (eventData.result as { endpoint?: string }).endpoint || this.url;
+              continue;
+            }
+
+            return eventData.result;
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    throw createTaggedMcpError("SSE stream ended without result.", "transport");
+  }
+}
+
 function normalizeTimeout(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value || "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
