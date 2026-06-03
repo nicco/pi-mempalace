@@ -37,6 +37,9 @@ tmp/
 # Worktrees
 .worktrees/
 
+# Package lock (library, not an app)
+package-lock.json
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
