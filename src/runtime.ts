@@ -3,6 +3,8 @@ import { getDefaultPiHookSettings, normalizeHookSettingsPayload } from "./hook-s
 import { getMcpPromptGuidelines } from "./constants";
 import { callLocalMemPalaceTool, discoverLocalMemPalaceTools, hasStructuredToolFailure, readRecentHookLog } from "./local-backend";
 import { MemPalaceMcpClient, type McpToolDefinition, getMcpErrorKind, mcpToolSchemaToTypeBox, normalizeMcpToolResult } from "./mcp-client";
+import { loadMcpConfig } from "./mcp-config";
+import { StdioTransport, HttpTransport, type McpTransport, createTaggedMcpError } from "./mcp-transport";
 import type { AutoIngestOutcome } from "./utils";
 import { getMemPalaceSetupGuidance, getMemPalaceSetupGuidanceFromExec, runMemPalace, toolResult, unavailableToolResult } from "./utils";
 
@@ -52,7 +54,8 @@ export class MemPalaceRuntime {
 	lastMemoriesFiledAway?: MemoriesFiledAwayState;
 	lastReconnect?: ReconnectState;
 	lastFallback?: LocalFallbackState;
-	private mcpClient?: MemPalaceMcpClient;
+	private transport?: McpTransport;
+	mcpTransportType: "stdio" | "http" | "none" = "none";
 	mcpStartupError?: string;
 	lastMcpToolError?: string;
 	localFallbackError?: string;
@@ -69,9 +72,35 @@ export class MemPalaceRuntime {
 
 	constructor(private readonly pi: ExtensionAPI) {}
 
-	getMcpClient() {
-		if (!this.mcpClient) this.mcpClient = new MemPalaceMcpClient();
-		return this.mcpClient;
+	async createTransport(signal?: AbortSignal): Promise<McpTransport> {
+		if (this.transport) return this.transport;
+
+		const config = await loadMcpConfig();
+
+		if (config.mcpUrl) {
+			// Remote MCP server configured — use HTTP transport
+			this.mcpTransportType = "http";
+			const transport = new HttpTransport(config.mcpUrl, config.mcpTimeout);
+			try {
+				await transport.connect(signal);
+				this.transport = transport;
+				return transport;
+			} catch (error) {
+				// Remote failed — do NOT fall back to stdio. Tag and throw.
+				throw error instanceof Error ? error : createTaggedMcpError(String(error), "transport");
+			}
+		}
+
+		// No remote configured — use stdio subprocess (current behavior)
+		this.mcpTransportType = "stdio";
+		const transport = new StdioTransport();
+		try {
+			await transport.connect(signal);
+			this.transport = transport;
+			return transport;
+		} catch (error) {
+			throw error instanceof Error ? error : createTaggedMcpError(String(error), "transport");
+		}
 	}
 
 	async ensureLocalFallbackTools(signal?: AbortSignal) {
@@ -101,11 +130,12 @@ export class MemPalaceRuntime {
 			return { tools: [] };
 		}
 		try {
-			const client = this.getMcpClient();
-			const { tools } = await client.connect(signal);
+			const transport = await this.createTransport(signal);
+			const client = new MemPalaceMcpClient();
+			client.setTransport(transport);
 			this.mcpStartupError = undefined;
 			this.registerDiscoveredMcpTools();
-			return { client, tools };
+			return { client, tools: transport.getTools?.() ?? [] };
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
 			this.mcpStartupError = detail;
@@ -360,7 +390,7 @@ export class MemPalaceRuntime {
 	}
 
 	registerDiscoveredMcpTools() {
-		for (const tool of this.mcpClient?.getTools() ?? []) {
+		for (const tool of this.transport?.getTools() ?? []) {
 			if (this.registeredMcpTools.has(tool.name)) continue;
 			if (["mempalace_status", "mempalace_search"].includes(tool.name)) continue;
 			this.registeredMcpTools.add(tool.name);
@@ -458,10 +488,11 @@ export class MemPalaceRuntime {
 	}
 
 	async shutdown() {
-		await this.mcpClient?.close();
+		await this.transport?.close();
+		this.transport = undefined;
 	}
 
 	getMcpStderr() {
-		return this.mcpClient?.getStderr() ?? "";
+		return this.transport?.getStderr() ?? "";
 	}
 }

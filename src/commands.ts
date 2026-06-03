@@ -127,6 +127,7 @@ export function registerCommands(pi: ExtensionAPI, runtime: MemPalaceRuntime) {
 				const availableMemoryFiling = MEMORY_FILING_TOOLS.filter((name) => toolNames.includes(name));
 				const availableSystemTools = SYSTEM_SUPPORT_TOOLS.filter((name) => toolNames.includes(name));
 				lines.push(`mcp command: ${client.getCommandLine()}`);
+				lines.push(`mcp transport: ${runtime.mcpTransportType}`);
 				lines.push(`mcp tool count: ${mcpTools.length}`);
 				lines.push(`mcp registered dynamically: ${[...runtime.registeredMcpTools].sort().join(", ") || "none"}`);
 				lines.push(`mcp disabled tools: ${[...runtime.disabledMcpTools].sort().join(", ") || "none"}`);
