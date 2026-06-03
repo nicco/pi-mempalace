@@ -34,6 +34,9 @@ tmp/
 .oh-my-opencode-pi-stats.json
 .oh-my-opencode-pi-workflow.json
 
+# Worktrees
+.worktrees/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
