@@ -117,10 +117,12 @@ test("CLI write tools trigger reconnect after successful writes", () => {
 
 test("MCP client enforces internal connect and request timeouts", () => {
 	const mcpClient = read("src/mcp-client.ts");
-	assert.match(mcpClient, /DEFAULT_MCP_CONNECT_TIMEOUT_MS/);
-	assert.match(mcpClient, /DEFAULT_MCP_REQUEST_TIMEOUT_MS/);
-	assert.match(mcpClient, /timed out after \$\{timeoutMs\}ms during initialize\/tools\/list/);
-	assert.match(mcpClient, /MemPalace MCP request timed out after \$\{timeoutMs\}ms: \$\{method\}/);
+	const mcpTransport = read("src/mcp-transport.ts");
+	const combined = mcpClient + "\n" + mcpTransport;
+	assert.match(combined, /DEFAULT_MCP_CONNECT_TIMEOUT_MS/);
+	assert.match(combined, /DEFAULT_MCP_REQUEST_TIMEOUT_MS/);
+	assert.match(combined, /timed out after \$\{timeoutMs\}ms during initialize\/tools\/list/);
+	assert.match(combined, /MemPalace MCP request timed out after \$\{timeoutMs\}ms: \$\{method\}/);
 });
 
 
@@ -140,16 +142,16 @@ test("local backend discovers tools from MemPalace Python TOOLS and includes syn
 
 
 test("MCP client keeps stdout reader open after startup for later tool calls", () => {
-	const mcpClient = read("src/mcp-client.ts");
-	assert.match(mcpClient, /private stdoutReader\?: readline\.Interface/);
-	assert.match(mcpClient, /this\.stdoutReader = rl/);
-	assert.doesNotMatch(mcpClient, /if \(startupComplete\) \{\s*rl\.close\(\);\s*\}/);
+	const mcpTransport = read("src/mcp-transport.ts");
+	assert.match(mcpTransport, /private stdoutReader\?: readline\.Interface/);
+	assert.match(mcpTransport, /this\.stdoutReader = rl/);
+	assert.doesNotMatch(mcpTransport, /if \(startupComplete\) \{\s*rl\.close\(\);\s*\}/);
 });
 
 
 test("runtime opens an MCP circuit breaker for transport failures, keeps tool errors local, and routes dynamic tools through fallback", () => {
 	const runtime = read("src/runtime.ts");
-	const mcpClient = read("src/mcp-client.ts");
+	const mcpTransport = read("src/mcp-transport.ts");
 	assert.match(runtime, /mcpCircuitOpen = false/);
 	assert.match(runtime, /tripMcpCircuit/);
 	assert.match(runtime, /const kind = getMcpErrorKind\(error\)/);
@@ -158,10 +160,10 @@ test("runtime opens an MCP circuit breaker for transport failures, keeps tool er
 	assert.match(runtime, /return this\.runFallbackTool\(tool\.name/);
 	assert.match(runtime, /registerDynamicTool/);
 	assert.match(runtime, /recordFallback\(/);
-	assert.match(mcpClient, /createTaggedMcpError/);
-	assert.match(mcpClient, /getMcpErrorKind/);
-	assert.match(mcpClient, /"transport"/);
-	assert.match(mcpClient, /"tool"/);
+	assert.match(mcpTransport, /createTaggedMcpError/);
+	assert.match(mcpTransport, /getMcpErrorKind/);
+	assert.match(mcpTransport, /"transport"/);
+	assert.match(mcpTransport, /"tool"/);
 });
 
 
