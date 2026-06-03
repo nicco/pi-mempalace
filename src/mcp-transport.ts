@@ -364,28 +364,50 @@ export class HttpTransport implements McpTransport {
   }
 
   async connect(signal?: AbortSignal): Promise<void> {
-    // Step 1: initialize
-    const initResult = await this.post(
-      "initialize",
-      {
+    // Step 1: initialize (first request — no session ID yet)
+    const initBody = JSON.stringify({
+      jsonrpc: "2.0",
+      id: this.nextId++,
+      method: "initialize",
+      params: {
         protocolVersion: "2025-11-25",
         capabilities: { tools: {} },
         clientInfo: { name: "pi-mempalace", version: "0.2.2" },
       },
-      signal,
-    );
+    });
 
-    if ((initResult as { error?: { message?: string } })?.error) {
+    const initResponse = await fetch(this.url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: initBody,
+      signal,
+    });
+
+    if (!initResponse.ok) {
+      const text = await initResponse.text().catch(() => "");
       throw createTaggedMcpError(
-        `MCP initialize failed: ${(initResult as { error: { message: string } }).error.message}`,
+        `MCP initialize HTTP ${initResponse.status}: ${text || initResponse.statusText}`,
         "transport",
       );
     }
 
     // Step 2: capture session ID from response headers
-    this.sessionId = (initResult as { _sessionId?: string })._sessionId;
-    if (!this.sessionId) {
+    const sessionId = initResponse.headers.get("Mcp-Session-Id");
+    if (!sessionId) {
       throw createTaggedMcpError("MCP initialize did not return a session ID", "transport");
+    }
+    this.sessionId = sessionId;
+
+    // Parse the initialize result
+    const initData = await initResponse.json() as { id?: number; result?: unknown; error?: { message?: string } };
+    if (initData.error) {
+      throw createTaggedMcpError(
+        `MCP initialize failed: ${initData.error.message || "unknown error"}`,
+        "transport",
+      );
     }
 
     // Step 3: notify initialized
